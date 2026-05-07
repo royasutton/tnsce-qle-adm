@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 1.9
+# Version: 2.0
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="1.9"
+VERSION="2.0"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -120,10 +120,10 @@ d = {
     'assignments': {},
     'seen_initiators': {},
     'isp_params': {
-        'ISP2432': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0'},
-        'ISP2532': {'default': 'qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1'},
-        'ISP2322': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0'},
-        'DEFAULT': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0'}
+        'ISP2432': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'},
+        'ISP2532': {'default': 'qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'},
+        'ISP2322': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'},
+        'DEFAULT': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'}
     },
     'isp_active_profile': {},
     'wwn_names': {},
@@ -350,6 +350,22 @@ sysfs_write() {
     log "sysfs: $path = $val"
 }
 
+# Read current sysfs value and only write if it differs.
+# Prevents EINVAL errors from writing a value already set (e.g. enabled=1 when already 1).
+sysfs_write_if_changed() {
+    local path="$1" val="$2"
+    if [[ $DRY_RUN -eq 1 ]]; then info "[DRY-RUN] sysfs_write_if_changed '$val' > $path"; return 0; fi
+    if [[ ! -e "$path" ]]; then err "sysfs path not found: $path"; return 1; fi
+    local current
+    current=$(cat "$path" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [[ "$current" == "$val" ]]; then
+        [[ $VERBOSE -eq 1 ]] && info "sysfs: $path already $val — skipping"
+        return 0
+    fi
+    echo "$val" > "$path" 2>/dev/null || { err "Failed to write '$val' to $path (current: $current)"; return 1; }
+    log "sysfs: $path = $val (was: $current)"
+}
+
 sysfs_read() {
     local path="$1"
     [[ -r "$path" ]] && cat "$path" 2>/dev/null | tr -d '\n' || echo ""
@@ -511,9 +527,9 @@ try:
     entry = isp_map.get('${isp_type}', isp_map.get('DEFAULT', {}))
     active = d.get('isp_active_profile', {}).get('${isp_type}', 'default')
     profile = '${profile_override}' if '${profile_override}' else active
-    print(entry.get(profile, entry.get('default', 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0')))
+    print(entry.get(profile, entry.get('default', 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0')))
 except:
-    print('qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0')
+    print('qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0')
 "
 }
 
@@ -707,10 +723,10 @@ scst_enable_target() {
     local rel_id=$(( idx + 10 ))
     local rel_path="${tgt_path}/rel_tgt_id"
     if [[ -e "$rel_path" ]]; then
-        sysfs_write "$rel_path" "$rel_id" || true
+        sysfs_write_if_changed "$rel_path" "$rel_id" || true
     fi
 
-    sysfs_write "${tgt_path}/enabled" "1"
+    sysfs_write_if_changed "${tgt_path}/enabled" "1"
 }
 
 scst_record_sessions() {
@@ -815,7 +831,8 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
-    # boot service
+    # boot service — calls sync --boot which rebuilds scst.conf and loads the
+    # module. SCST then starts and reads the reconstructed scst.conf naturally.
     file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
 Description=qle_adm FC Target Boot Setup
 Before=scst.service
@@ -825,7 +842,7 @@ After=local-fs.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh setup --boot
+ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot
 
 [Install]
 WantedBy=multi-user.target"
@@ -881,54 +898,171 @@ cmd_uninstall() {
 }
 
 # ─── scst.conf FC target block ────────────────────────────────────────────────
-scst_conf_ensure_fc_target() {
-    # Inject TARGET_DRIVER qla2x00t block into /etc/scst.conf if missing.
-    # TrueNAS WUI regenerates scst.conf on every iSCSI change, wiping manual
-    # edits. This function is called from setup --boot (which runs as
-    # ExecStartPre before SCST starts) so the block is always present when
-    # SCST reads the file.
+# ─── scst.conf FC target block renderer ───────────────────────────────────────
+# Serializes the full TARGET_DRIVER qla2x00t { TARGET ... { GROUP ... } } block
+# from config.json into /etc/scst.conf, replacing any existing block.
+#
+# Called by sync --boot (before SCST starts on every boot) and by sync
+# (at runtime after a WUI iSCSI save wiped the block). SCST reads the file
+# naturally at startup — no sysfs apply step is needed or performed at boot.
+render_scst_conf() {
     local conf="/etc/scst.conf"
-    [[ -f "$conf" ]] || { warn "scst.conf not found — skipping FC target block injection"; return 0; }
-    if grep -q "TARGET_DRIVER qla2x00t" "$conf"; then
-        ok "scst.conf already contains TARGET_DRIVER qla2x00t block"
+    [[ -f "$conf" ]] || { warn "scst.conf not found — skipping FC target block render"; return 0; }
+
+    local block
+    block=$(py_json "
+import json, sys
+
+try:
+    d = json.load(open('${CONFIG}'))
+except Exception as e:
+    print(f'# qle_adm: failed to load config: {e}', file=sys.stderr)
+    sys.exit(1)
+
+enabled_ports = d.get('enabled_ports', [])
+open_extents  = d.get('open_extents', [])
+assignments   = d.get('assignments', {})
+
+lines = []
+lines.append('TARGET_DRIVER qla2x00t {')
+lines.append('')
+
+for port_idx, wwn in enumerate(enabled_ports):
+    rel_tgt_id = port_idx + 10
+    lines.append(f'    TARGET {wwn} {{}')
+    lines.append(f'        enabled 1')
+    lines.append(f'        rel_tgt_id {rel_tgt_id}')
+    lines.append('')
+
+    # Open extents: no GROUP wrapper — visible to all initiators
+    for lun_idx, ext in enumerate(open_extents):
+        lines.append(f'        LUN {lun_idx} {ext}')
+
+    if open_extents:
+        lines.append('')
+
+    # Per-initiator groups
+    for initiator, data in assignments.items():
+        extents = data.get('extents', [])
+        luns    = data.get('luns', {})
+        if not extents:
+            continue
+        lines.append(f'        GROUP {initiator} {{}')
+        lines.append(f'            INITIATOR {initiator}')
+        lines.append('')
+        for ext in extents:
+            lun_id = luns.get(ext, extents.index(ext))
+            lines.append(f'            LUN {lun_id} {ext}')
+        lines.append('        }')
+        lines.append('')
+
+    lines.append('    }')
+    lines.append('')
+
+lines.append('}')
+print('\n'.join(lines))
+")
+
+    if [[ -z "$block" ]]; then
+        err "render_scst_conf: config.json produced empty block — aborting"
+        return 1
+    fi
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "[DRY-RUN] would replace TARGET_DRIVER qla2x00t block in ${conf}"
+        echo "$block"
         return 0
     fi
-    info "Injecting TARGET_DRIVER qla2x00t block into ${conf}"
-    if [[ $DRY_RUN -eq 0 ]]; then
-        cat >> "$conf" << 'EOF'
 
-TARGET_DRIVER qla2x00t {
+    # Strip existing block (brace-counted) then append rebuilt one
+    python3 - "$conf" "$block" << 'PYEOF'
+import sys, re
+
+conf_path = sys.argv[1]
+new_block  = sys.argv[2]
+
+with open(conf_path) as f:
+    content = f.read()
+
+pattern = re.compile(r'\n?TARGET_DRIVER\s+qla2x00t\s*\{', re.MULTILINE)
+m = pattern.search(content)
+if m:
+    depth = 0
+    for j, ch in enumerate(content[m.start():], m.start()):
+        if ch == '{': depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                content = content[:m.start()].rstrip() + content[j+1:]
+                break
+
+content = content.rstrip() + '\n\n' + new_block + '\n'
+
+with open(conf_path, 'w') as f:
+    f.write(content)
+PYEOF
+
+    ok "FC target block written to ${conf}"
+    log "render_scst_conf: rewrote TARGET_DRIVER qla2x00t block in ${conf}"
 }
-EOF
-        ok "Injected TARGET_DRIVER qla2x00t block into ${conf}"
-        log "injected TARGET_DRIVER qla2x00t into ${conf}"
-    else
-        info "[DRY-RUN] would append TARGET_DRIVER qla2x00t {} to ${conf}"
-    fi
-}
 
 
-cmd_setup() {
+cmd_sync() {
     local boot_mode=0
     [[ "${1:-}" == "--boot" ]] && boot_mode=1
-    hdr "Setting up FC targets"
+    hdr "Sync${boot_mode:+ (boot mode)}"
     cfg_init
 
     local isp_type; isp_type=$(get_isp_type_dominant)
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
-    # Ensure scst.conf has FC target block before SCST starts
-    scst_conf_ensure_fc_target
-
-    if ! module_loaded "qla2xxx_scst"; then
-        load_target_module "$isp_type"
-        sleep 5
+    # Restore modprobe config if missing (after BE change or upgrade)
+    if [[ ! -f "$MODPROBE_CONF" ]]; then
+        warn "modprobe config missing — restoring"
+        local params; params=$(get_module_params "$isp_type")
+        file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
     else
-        ok "qla2xxx_scst already loaded"
+        ok "modprobe config present"
     fi
 
-    cmd_apply
-    ok "Setup complete"
+    # Restore boot service if missing (after BE change or upgrade)
+    if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
+        warn "qle_adm-boot.service missing — restoring"
+        file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
+Description=qle_adm FC Target Boot Setup
+Before=scst.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
+ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot
+
+[Install]
+WantedBy=multi-user.target"
+        [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload && systemctl enable qle_adm-boot.service
+    else
+        ok "qle_adm-boot.service present"
+    fi
+
+    # Rebuild scst.conf FC target block from config.json
+    render_scst_conf
+
+    if [[ $boot_mode -eq 1 ]]; then
+        # Load the target module. SCST starts after this service exits and
+        # reads the reconstructed scst.conf naturally — no sysfs apply needed.
+        if ! module_loaded "qla2xxx_scst"; then
+            load_target_module "$isp_type"
+            sleep 5
+        else
+            ok "qla2xxx_scst already loaded"
+        fi
+        ok "Boot sync complete — SCST will initialize FC targets from scst.conf"
+    else
+        ok "Sync complete — scst.conf updated from config.json"
+        info "Live sysfs state not touched. Restart SCST only if required."
+    fi
 }
 
 cmd_teardown() {
@@ -953,125 +1087,20 @@ cmd_teardown() {
 }
 
 cmd_apply() {
-    hdr "Applying configuration"
-    cfg_init
-
-    local enabled_ports; enabled_ports=$(cfg_get_list "enabled_ports")
-    [[ -z "$enabled_ports" ]] && { warn "No ports enabled. Use 'qle_adm.sh port enable <wwn>'"; return; }
-
-    while IFS= read -r wwn; do
-        [[ -z "$wwn" ]] && continue
-        local tgt_path; tgt_path=$(scst_target_path "$wwn")
-        if [[ ! -d "$tgt_path" ]]; then
-            warn "Target path not found for ${wwn} — SCST may not be running"
-            continue
-        fi
-
-        # Get port index for rel_tgt_id
-        local port_idx=0
-        local i=0
-        while IFS= read -r pwwn; do
-            [[ "$pwwn" == "$wwn" ]] && port_idx=$i
-            i=$((i + 1))
-        done < <(get_port_wwns_sorted)
-
-        # Enable target with unique rel_tgt_id
-        scst_enable_target "$wwn" "$port_idx"
-        ok "Target ${wwn} enabled (rel_tgt_id=$((port_idx + 1)))"
-
-        # Apply open extents to default group
-        local lun=0
-        while IFS= read -r ext; do
-            [[ -z "$ext" ]] && continue
-            local lun_path="${tgt_path}/luns/${lun}"
-            if [[ ! -d "$lun_path" ]]; then
-                info "Adding LUN ${lun} -> ${ext} (open)"
-                sysfs_write "${tgt_path}/luns/mgmt" "add ${ext} ${lun}" || true
-            fi
-            lun=$((lun + 1))
-        done < <(cfg_get_list "open_extents")
-
-        # Apply per-initiator assignments
-        py_json "
-import json, sys
-try:
-    d = json.load(open('${CONFIG}'))
-    for init, data in d.get('assignments', {}).items():
-        if data.get('extents'):
-            print(init)
-except:
-    pass
-" | while IFS= read -r initiator; do
-            # Use WWN directly as group name — matches SCST auto-created group on session connect
-            local grp_path="${tgt_path}/ini_groups/${initiator}"
-            if [[ ! -d "$grp_path" ]]; then
-                sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${initiator}" || true
-                sysfs_write "${grp_path}/initiators/mgmt" "add ${initiator}" || true
-                info "Created ini_group ${initiator}"
-            else
-                # Ensure initiator is in the group
-                grep -qr "$initiator" "${grp_path}/initiators/" 2>/dev/null || \
-                    sysfs_write "${grp_path}/initiators/mgmt" "add ${initiator}" || true
-            fi
-            py_json "
-import json
-d = json.load(open('${CONFIG}'))
-data = d.get('assignments', {}).get('${initiator}', {})
-for i, ext in enumerate(data.get('extents', [])):
-    lun = data.get('luns', {}).get(ext, i)
-    print(f'{lun} {ext}')
-" | while IFS= read -r lun ext; do
-                [[ ! -d "${grp_path}/luns/${lun}" ]] && \
-                    sysfs_write "${grp_path}/luns/mgmt" "add ${ext} ${lun}" || true
-            done
-        done
-
-    done <<< "$enabled_ports"
-    ok "Configuration applied"
+    err "'apply' has been retired. All change commands write atomically to both config.json and sysfs."
+    err "Use 'sync' to rebuild scst.conf from config.json if needed."
+    exit 1
 }
 
 cmd_save() {
-    hdr "Saving configuration"
-    scst_record_sessions
-    ok "Configuration saved to ${CONFIG}"
+    err "'save' has been retired. seen_initiators are captured automatically by 'status' and 'list-initiators'."
+    err "All configuration changes are written atomically to config.json by each change command."
+    exit 1
 }
 
 cmd_repair() {
-    hdr "Repair / Post-Upgrade Recovery"
-    info "Checking for missing components..."
-
-    if [[ ! -f "$MODPROBE_CONF" ]]; then
-        warn "Reinstalling modprobe config"
-        local isp_type; isp_type=$(get_isp_type_dominant)
-        local params; params=$(get_module_params "$isp_type")
-        file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
-    else
-        ok "modprobe config present"
-    fi
-
-    if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
-        warn "Reinstalling qle_adm-boot.service"
-        file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
-Description=qle_adm FC Target Boot Setup
-Before=scst.service
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh setup --boot
-
-[Install]
-WantedBy=multi-user.target"
-        [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload && systemctl enable qle_adm-boot.service
-    else
-        ok "qle_adm-boot.service present"
-    fi
-
-    info "Shell rc files not modified. Invoke as: ${QLE_ADM_HOME}/qle_adm.sh <command>"
-    ok "Repair complete"
-    info "Run 'qle_adm.sh setup' to reload modules and apply config"
+    err "'repair' has been retired. Use 'sync' to restore /etc files from config.json."
+    exit 1
 }
 
 cmd_status() {
@@ -1107,7 +1136,7 @@ cmd_status() {
     if [[ -f "$MODPROBE_CONF" ]]; then
         ok "modprobe config present: ${MODPROBE_CONF}"
     else
-        gap "modprobe config missing: ${MODPROBE_CONF}"
+        gap "modprobe config missing: ${MODPROBE_CONF} — run 'qle_adm.sh sync'"
         gaps=$((gaps + 1))
     fi
 
@@ -1118,6 +1147,13 @@ cmd_status() {
         gaps=$((gaps + 1))
     fi
 
+    if grep -q "TARGET_DRIVER qla2x00t" /etc/scst.conf 2>/dev/null; then
+        ok "scst.conf contains TARGET_DRIVER qla2x00t block"
+    else
+        gap "scst.conf missing TARGET_DRIVER qla2x00t block — run 'qle_adm.sh sync'"
+        gaps=$((gaps + 1))
+    fi
+
     # Param drift check
     local isp_type; isp_type=$(get_isp_type_dominant 2>/dev/null || echo "")
     if [[ -n "$isp_type" ]] && module_loaded "qla2xxx_scst"; then
@@ -1125,8 +1161,7 @@ cmd_status() {
         applied=$(get_applied_params)
         configured=$(get_module_params "$isp_type")
         if [[ -n "$applied" && "$applied" != "$configured" ]]; then
-            gap "Module params drift — applied differs from configured (run 'setup' to resync)"
-            gaps=$((gaps + 1))
+            gap "Module params drift — applied differs from configured (run 'setup' to resync)"            gaps=$((gaps + 1))
         fi
     fi
 
@@ -1176,7 +1211,7 @@ cmd_status() {
     if [[ $gaps -eq 0 ]]; then
         ok "No gaps detected — system fully operational"
     else
-        warn "${gaps} gap(s) detected — run 'qle_adm.sh repair' to fix"
+        warn "${gaps} gap(s) detected — run 'qle_adm.sh sync' to fix"
     fi
 }
 
@@ -1410,7 +1445,7 @@ cmd_port_disable() {
     warn "Disabling port ${wwn}"
     cfg_list_remove "enabled_ports" "$wwn"
     local tgt_path; tgt_path=$(scst_target_path "$wwn")
-    [[ -d "$tgt_path" ]] && sysfs_write "${tgt_path}/enabled" "0" && ok "Port ${wwn} disabled"
+    [[ -d "$tgt_path" ]] && sysfs_write_if_changed "${tgt_path}/enabled" "0" && ok "Port ${wwn} disabled"
 }
 
 cmd_open() {
@@ -1558,7 +1593,7 @@ print(count)
         while IFS= read -r wwn; do
             [[ -z "$wwn" ]] && continue
             local tgt_path; tgt_path=$(scst_target_path "$wwn")
-            [[ -d "$tgt_path" ]] && sysfs_write "${tgt_path}/enabled" "0" || true
+            [[ -d "$tgt_path" ]] && sysfs_write_if_changed "${tgt_path}/enabled" "0" || true
             info "Disabled port ${wwn}"
         done < <(cfg_get_list "enabled_ports")
         py_json "
@@ -2078,8 +2113,8 @@ usage() {
 
 ${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
 ${DIM}${sep}${NC}
-Deployment   : install  uninstall  repair
-Operation    : setup [--boot]  teardown  apply  save
+Deployment   : install  uninstall
+Operation    : sync [--boot]  teardown
                clear <seen|ports|mappings|names|all>
 Status       : status  hba-info  stats [--watch|--wide]  list-all
                list-ports  list-extents  list-initiators [--seen]  list-assignments
@@ -2108,18 +2143,20 @@ ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before
 ${CYN}Deployment:${NC}
   install                        Deploy systemd units and modprobe config
   uninstall                      Remove all installed components
-  repair                         Fix missing components after upgrade/BE change
 
 ${CYN}Operation:${NC}
-  setup [--boot]                 Load modules, apply firmware overlay, activate targets
+  sync [--boot]                  Rebuild scst.conf and modprobe config from config.json.
+                                 --boot also loads qla2xxx_scst before SCST starts;
+                                 SCST then reads the reconstructed scst.conf naturally.
+                                 Without --boot: files only, live sysfs state not touched.
+                                 Use after a WUI iSCSI save wiped the FC target block.
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
-  apply                          Re-apply config.json to running SCST without full reload
-  save                           Record currently connected initiators to config.json
   clear <seen|ports|mappings|names|all>
-                                 Clear accumulated operational state from config and sysfs
+                                 Clear accumulated state from config.json and live sysfs
 
 ${CYN}Status:${NC}
-  status                         Full state: modules, ports, sessions, gap analysis
+  status                         Full state: modules, ports, sessions, gap analysis.
+                                 Passively captures seen_initiators from active sessions.
   hba-info                       Per-port detail: ISP type, firmware, PCI link, WWN
   stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
   list-ports                     FC ports with managed/unmanaged state and index [N]
@@ -2156,7 +2193,7 @@ ${CYN}Configuration:${NC}
   isp-params set <ISP> [--profile <name>] '<params>'
                                  Create or update a named parameter profile
   isp-params use <ISP> --profile <name>
-                                 Set active profile (used on next setup/reload)
+                                 Set active profile (used on next sync --boot / module reload)
   isp-params del <ISP> [--profile <name>]
                                  Delete a profile, or entire ISP entry if no --profile
 
@@ -2220,6 +2257,16 @@ cmd_examples() {
 
   # Verify state after install
   ./qle_adm.sh status
+EX
+
+    exhdr "Sync config.json to scst.conf"
+    cat << 'EX'
+
+  # After any WUI iSCSI save that wiped the FC target block:
+  ./qle_adm.sh sync
+
+  # Rebuilds scst.conf from config.json.
+  # Live sysfs state and active sessions are not touched.
 EX
 
     exhdr "Bring up a target port and map a LUN"
@@ -2301,7 +2348,7 @@ EX
     exhdr "Dry-run any operation"
     cat << 'EX'
 
-  ./qle_adm.sh --dry-run setup
+  ./qle_adm.sh --dry-run sync
   ./qle_adm.sh --dry-run fw save
   ./qle_adm.sh --dry-run assign --ext 0 --init 0
 EX
@@ -2348,11 +2395,8 @@ main() {
     case "$cmd" in
         install)         cmd_install ;;
         uninstall)       cmd_uninstall ;;
-        repair)          cmd_repair ;;
-        setup)           cmd_setup "${rest[@]}" ;;
+        sync)            cmd_sync "${rest[@]}" ;;
         teardown)        cmd_teardown ;;
-        apply)           cmd_apply ;;
-        save)            cmd_save ;;
         clear)           cmd_clear "${rest[@]}" ;;
         status)          cmd_status ;;
         hba-info)        cmd_hba_info ;;
@@ -2375,6 +2419,11 @@ main() {
         fw)         cmd_fw         "${rest[@]}" ;;
         isp-params) cmd_isp_params "${rest[@]}" ;;
         name)       cmd_name       "${rest[@]}" ;;
+        # Retired commands — informative errors rather than silent failure
+        setup)   err "'setup' has been replaced by 'sync [--boot]'"; exit 1 ;;
+        apply)   err "'apply' has been retired — all changes are written atomically to config.json and sysfs"; exit 1 ;;
+        save)    err "'save' has been retired — seen_initiators are captured automatically by 'status' and 'list-initiators'"; exit 1 ;;
+        repair)  err "'repair' has been retired — use 'sync' to restore /etc files from config.json"; exit 1 ;;
         *) err "Unknown command: ${cmd}"; usage; exit 1 ;;
     esac
 }
