@@ -1086,22 +1086,8 @@ cmd_teardown() {
     fi
 }
 
-cmd_apply() {
-    err "'apply' has been retired. All change commands write atomically to both config.json and sysfs."
-    err "Use 'sync' to rebuild scst.conf from config.json if needed."
-    exit 1
-}
 
-cmd_save() {
-    err "'save' has been retired. seen_initiators are captured automatically by 'status' and 'list-initiators'."
-    err "All configuration changes are written atomically to config.json by each change command."
-    exit 1
-}
 
-cmd_repair() {
-    err "'repair' has been retired. Use 'sync' to restore /etc files from config.json."
-    exit 1
-}
 
 cmd_status() {
     hdr "qle_adm Status v${VERSION}"
@@ -1535,7 +1521,28 @@ if '${extent}' not in init_data['extents']:
     init_data['luns']['${extent}'] = next_lun
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
-    cmd_apply
+    # Apply live to sysfs
+    while IFS= read -r wwn; do
+        [[ -z "$wwn" ]] && continue
+        local tgt_path; tgt_path=$(scst_target_path "$wwn")
+        [[ -d "$tgt_path" ]] || continue
+        local grp_path="${tgt_path}/ini_groups/${initiator}"
+        if [[ ! -d "$grp_path" ]]; then
+            sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${initiator}" || true
+            sysfs_write "${grp_path}/initiators/mgmt" "add ${initiator}" || true
+        fi
+        py_json "
+import json
+d = json.load(open('${CONFIG}'))
+data = d.get('assignments', {}).get('${initiator}', {})
+for i, ext in enumerate(data.get('extents', [])):
+    lun = data.get('luns', {}).get(ext, i)
+    print(f'{lun} {ext}')
+" | while IFS= read -r lun_id ext_name; do
+            [[ ! -d "${grp_path}/luns/${lun_id}" ]] && \
+                sysfs_write "${grp_path}/luns/mgmt" "add ${ext_name} ${lun_id}" || true
+        done
+    done < <(cfg_get_list "enabled_ports")
     ok "Assigned ${extent} to ${initiator}"
 }
 
@@ -2419,11 +2426,7 @@ main() {
         fw)         cmd_fw         "${rest[@]}" ;;
         isp-params) cmd_isp_params "${rest[@]}" ;;
         name)       cmd_name       "${rest[@]}" ;;
-        # Retired commands — informative errors rather than silent failure
-        setup)   err "'setup' has been replaced by 'sync [--boot]'"; exit 1 ;;
-        apply)   err "'apply' has been retired — all changes are written atomically to config.json and sysfs"; exit 1 ;;
-        save)    err "'save' has been retired — seen_initiators are captured automatically by 'status' and 'list-initiators'"; exit 1 ;;
-        repair)  err "'repair' has been retired — use 'sync' to restore /etc files from config.json"; exit 1 ;;
+        # Unknown command
         *) err "Unknown command: ${cmd}"; usage; exit 1 ;;
     esac
 }

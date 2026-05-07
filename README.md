@@ -59,6 +59,55 @@ without touching live sysfs state or active sessions.
 
 ## Quick Start
 
+Expose an existing ZFS extent to FC initiators without installing
+`qle_adm.sh`. SCST must already be active (verify in the TrueNAS WUI
+under System > Services).
+
+Set `QLE_ADM_HOME` once for the session — all commands below use it:
+
+```bash
+export QLE_ADM_HOME=.
+```
+
+> When you are ready to make this persistent, update `QLE_ADM_HOME` to
+> a dataset under `/mnt` before running `install`.
+
+```bash
+# 1. Make the script executable
+chmod +x ./qle_adm.sh
+
+# 2. Load qla2xxx_scst and rebuild scst.conf from config.json
+#    (initializes config.json in the current directory on first run)
+./qle_adm.sh sync --boot
+
+# 3. Verify SCST, module, ports, and scst.conf block are all good
+./qle_adm.sh status
+
+# 4. List available extents and note the index [N]
+./qle_adm.sh list-extents
+
+# 5. List FC ports and note the index [N] of the port to use
+./qle_adm.sh list-ports
+
+# 6. Enable the target port
+./qle_adm.sh port enable --port 0
+
+# 7. Open the extent to all initiators
+./qle_adm.sh open --ext 0
+
+# 8. Verify the mapping and confirm the initiator session is active
+./qle_adm.sh list-assignments
+./qle_adm.sh list-initiators
+```
+
+The initiator can now scan for and mount the block device. When you are
+ready to make this configuration persistent across reboots, see
+[Quick Install](#quick-install) below.
+
+---
+
+## Quick Install
+
 ```bash
 # 1. Extract the archive and install to a persistent dataset
 QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
@@ -70,7 +119,7 @@ QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 ./qle_adm.sh port enable --port 0
 
 # 4a. Expose a ZFS volume to all initiators
-./qle_adm.sh open <extent-name>
+./qle_adm.sh open --ext 0
 
 # 4b. Or assign to a specific initiator only
 ./qle_adm.sh assign --ext 0 --init 0
