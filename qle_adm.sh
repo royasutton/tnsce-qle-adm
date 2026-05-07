@@ -2269,19 +2269,39 @@ usage() {
 
 ${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
 ${DIM}${sep}${NC}
-Deployment   : install  uninstall
-Operation    : sync [--boot] [--restart] [--system]  teardown  module load|unload|reload|status
-               clear <seen|ports|mappings|names|all>
-Status       : status  hba-info  stats [--watch|--wide]  list-all
-               list-ports  list-extents  list-initiators [--seen]  list-assignments
-Port         : port enable|disable  <wwn>|--port N
-LUN Mapping  : open  close  assign  unassign
-Firmware     : fw list|add|remove|save|show|status|flash
-Config       : isp-params list|set|use|del
-WWN Names    : name list|set|get|del
-Options      : help  examples  version
-               --dry-run  --yes  --verbose  --home <path>
-               --port N  --init N  --ext N
+Deployment   : install
+               uninstall
+
+Operation    : sync [--boot] [--restart] [--system]
+               module  load | unload | reload | status
+               teardown
+               clear  seen | ports | mappings | names | all
+
+Status       : status
+               hba-info
+               stats  [--watch] [--wide]
+               list-ports
+               list-extents
+               list-initiators  [--seen]
+               list-assignments
+               list-all
+
+Port         : port  enable | disable  <wwn> | --port N
+
+LUN Mapping  : open     <extent> | --ext N
+               close    <extent> | --ext N
+               assign   <extent> | --ext N  <wwn> | --init N  [lun]
+               unassign <extent> | --ext N  <wwn> | --init N
+
+Firmware     : fw  list | add | remove | save | show | status | flash
+
+Config       : isp-params  list | set | use | del
+
+WWN Names    : name  list | set | get | del
+
+Global       : --dry-run  --yes  --verbose  --home <path>
+               --port N   --init N   --ext N
+               help  examples  version
 ${DIM}${sep}${NC}
 ${DIM}Config: ${QLE_ADM_HOME}/config.json  |  Log: ${LOG}${NC}
 
