@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.1
+# Version: 2.2
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.1"
+VERSION="2.2"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -507,14 +507,48 @@ detect_hbas() {
         fw_raw=$(sysfs_read "${scsi_host}/fw_version" 2>/dev/null || echo "unknown")
         fw_ver=$(echo "$fw_raw" | awk '{print $1}')
         pci_addr=$(readlink -f "${scsi_host}/device" 2>/dev/null | grep -oP '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]' | tail -1 || echo "unknown")
-        isp_type=$(dmesg 2>/dev/null | grep "${pci_addr}" | grep -oP 'ISP\d+' | head -1 || echo "UNKNOWN")
+        # Prefer dmesg for ISP type; fall back to model_name sysfs attr which
+        # contains strings like "QLE2562" from which the ISP type is derivable.
+        isp_type=$(dmesg 2>/dev/null | grep "${pci_addr}" | grep -oP 'ISP\d+' | head -1)
+        if [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]]; then
+            local model_name
+            model_name=$(cat "${scsi_host}/model_name" 2>/dev/null || cat "${scsi_host}/board_name" 2>/dev/null || echo "")
+            case "$model_name" in
+                *QLE2562*|*QLE2564*|*AJ764*) isp_type="ISP2532" ;;
+                *QLE2462*|*QLE2460*)         isp_type="ISP2432" ;;
+                *QLE2360*|*QLE2362*)         isp_type="ISP2322" ;;
+                *QLE2342*|*QLE2340*)         isp_type="ISP2300" ;;
+                *) isp_type="UNKNOWN" ;;
+            esac
+        fi
         echo "${idx} ${host_num} ${pci_addr} ${isp_type} ${wwn} ${fw_ver} ${port_state} ${port_type}"
         idx=$((idx + 1))
     done
 }
 
 get_isp_type_dominant() {
-    detect_hbas | awk '{print $4}' | sort | uniq -c | sort -rn | awk '{print $2}' | head -1
+    # Returns the ISP type used by all target-capable ports (qla2xxx_scst).
+    # If multiple distinct ISP types are present among detected HBAs, warns
+    # and returns the most common one so the module param selection still works.
+    # If no ISP type can be determined, returns ISP2532 as a safe default for
+    # target mode and emits a warning.
+    local all_types
+    all_types=$(detect_hbas | awk '{print $4}' | grep -v UNKNOWN | sort | uniq -c | sort -rn)
+
+    if [[ -z "$all_types" ]]; then
+        warn "Could not determine ISP type from detected HBAs — defaulting to ISP2532"
+        echo "ISP2532"
+        return
+    fi
+
+    local distinct
+    distinct=$(echo "$all_types" | wc -l | tr -d ' ')
+    if [[ "$distinct" -gt 1 ]]; then
+        warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')"
+        warn "Module params will use the most common type — verify with 'module status'"
+    fi
+
+    echo "$all_types" | awk '{print $2}' | head -1
 }
 
 get_module_params() {
@@ -1210,6 +1244,23 @@ cmd_module() {
             ;;
         status)
             hdr "Module Status"
+            # Show all detected ports and their ISP types
+            local port_count=0
+            local isp_types_seen=""
+            echo -e "\n  ${CYN}Detected ports:${NC}"
+            detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
+                local state_col="$RED"; [[ "$state" == "Online" ]] && state_col="$GRN"
+                echo -e "  [${idx}] ${wwn}  ${isp}  ${host}  ${state_col}${state}${NC}"
+            done
+            # Count distinct ISP types
+            local distinct_types
+            distinct_types=$(detect_hbas | awk '{print $4}' | sort -u | grep -v UNKNOWN)
+            local type_count; type_count=$(echo "$distinct_types" | grep -c . || true)
+            if [[ "$type_count" -gt 1 ]]; then
+                warn "Multiple ISP types present: $(echo "$distinct_types" | tr '\n' ' ')"
+                warn "Module params apply globally — all ports share the same loaded module"
+            fi
+            echo ""
             if module_loaded "qla2xxx_scst"; then
                 ok "qla2xxx_scst loaded (target mode)"
                 local applied configured
@@ -1248,6 +1299,12 @@ cmd_status() {
     echo -e "\n${CYN}Modules:${NC}"
     if [[ -d /sys/module/qla2xxx_scst ]]; then
         ok "qla2xxx_scst loaded (target mode)"
+        # Warn if multiple distinct ISP types are present — params are global
+        local distinct_types
+        distinct_types=$(detect_hbas | awk '{print $4}' | sort -u | grep -v UNKNOWN)
+        local type_count; type_count=$(echo "$distinct_types" | grep -c . || true)
+        [[ "$type_count" -gt 1 ]] && \
+            warn "Multiple ISP types detected: $(echo "$distinct_types" | tr '\n' ' ')— module params are global"
     elif [[ -d /sys/module/qla2xxx ]]; then
         warn "qla2xxx loaded (initiator mode) — not target mode"
         gap "qla2xxx_scst not loaded"
