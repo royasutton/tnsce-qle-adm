@@ -831,8 +831,9 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
-    # boot service — calls sync --boot which rebuilds scst.conf and loads the
-    # module. SCST then starts and reads the reconstructed scst.conf naturally.
+    # boot service — calls sync --boot --system which rebuilds scst.conf,
+    # restores /etc files, and loads the module. SCST then starts and reads
+    # the reconstructed scst.conf naturally.
     file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
 Description=qle_adm FC Target Boot Setup
 Before=scst.service
@@ -842,7 +843,7 @@ After=local-fs.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot
+ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot --system
 
 [Install]
 WantedBy=multi-user.target"
@@ -1007,25 +1008,22 @@ PYEOF
 
 
 cmd_sync() {
-    local boot_mode=0 restart_mode=0
+    local boot_mode=0 restart_mode=0 system_mode=0
     for arg in "$@"; do
         [[ "$arg" == "--boot" ]]    && boot_mode=1
         [[ "$arg" == "--restart" ]] && restart_mode=1
+        [[ "$arg" == "--system" ]]  && system_mode=1
     done
+    # --boot always implies --system (boot service owns /etc file restoration)
+    [[ $boot_mode -eq 1 ]] && system_mode=1
 
-    hdr "Sync${boot_mode:+ (boot mode)}${restart_mode:+ (restart mode)}"
+    hdr "Sync${boot_mode:+ (boot)}${restart_mode:+ (restart)}${system_mode:+ (system)}"
     cfg_init
 
     local isp_type; isp_type=$(get_isp_type_dominant)
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
-    # Only manage /etc system files when installed to a persistent location.
-    # When running with QLE_ADM_HOME=. (uninstalled), skip modprobe config
-    # and boot service writes — those are install-time concerns only.
-    local is_installed=0
-    [[ "${QLE_ADM_HOME}" == /mnt/* ]] && is_installed=1
-
-    if [[ $is_installed -eq 1 ]]; then
+    if [[ $system_mode -eq 1 ]]; then
         # Restore modprobe config if missing (after BE change or upgrade)
         if [[ ! -f "$MODPROBE_CONF" ]]; then
             warn "modprobe config missing — restoring"
@@ -1047,7 +1045,7 @@ After=local-fs.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot
+ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot --system
 
 [Install]
 WantedBy=multi-user.target"
@@ -1056,7 +1054,7 @@ WantedBy=multi-user.target"
             ok "qle_adm-boot.service present"
         fi
     else
-        info "Running uninstalled (QLE_ADM_HOME=${QLE_ADM_HOME}) — skipping modprobe and boot service management"
+        info "Skipping system file management (use --system to write /etc files)"
     fi
 
     # Rebuild scst.conf FC target block from config.json
@@ -2272,7 +2270,7 @@ usage() {
 ${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
 ${DIM}${sep}${NC}
 Deployment   : install  uninstall
-Operation    : sync [--boot|--restart]  teardown  module load|unload|reload|status
+Operation    : sync [--boot] [--restart] [--system]  teardown  module load|unload|reload|status
                clear <seen|ports|mappings|names|all>
 Status       : status  hba-info  stats [--watch|--wide]  list-all
                list-ports  list-extents  list-initiators [--seen]  list-assignments
@@ -2303,14 +2301,19 @@ ${CYN}Deployment:${NC}
   uninstall                      Remove all installed components
 
 ${CYN}Operation:${NC}
-  sync [--boot|--restart]        Rebuild scst.conf and modprobe config from config.json.
+  sync [--boot] [--restart] [--system]
+                                 Rebuild scst.conf from config.json.
                                  --boot   : also loads qla2xxx_scst; used by boot service.
                                             SCST reads the reconstructed scst.conf naturally.
                                  --restart: rebuilds scst.conf then restarts scst.service.
                                             Warns and confirms before restart — all active
                                             sessions will be dropped.
-                                 (no flag): files only — live sysfs state not touched.
-                                            Safe at any time. Use after a WUI iSCSI save.
+                                 --system : also write/restore /etc files (modprobe config
+                                            and boot service). Implied by --boot. Use
+                                            explicitly after a BE change or upgrade when
+                                            not running from the boot service.
+                                 (no flag): scst.conf only — live sysfs untouched, no
+                                            /etc writes. Safe at any time.
   module <load|unload|reload|status>
                                  Manage the qla2xxx_scst kernel module independently
                                  of the SCST service and configuration files.
@@ -2431,15 +2434,17 @@ EX
     exhdr "Sync config.json to scst.conf"
     cat << 'EX'
 
-  # After any WUI iSCSI save that wiped the FC target block:
+  # After a WUI iSCSI save that wiped the FC target block (scst.conf only):
   ./qle_adm.sh sync
 
-  # Rebuilds scst.conf from config.json.
-  # Live sysfs state and active sessions are not touched.
+  # After a BE change or upgrade that wiped /etc files:
+  ./qle_adm.sh sync --system
 
-  # To also restart SCST so it re-reads the updated scst.conf:
+  # Rebuild scst.conf and restart SCST so it re-reads the file:
   ./qle_adm.sh sync --restart
-  # Warns and confirms before restart — all active sessions will be dropped.
+
+  # After a BE change or upgrade — restore /etc files AND restart SCST:
+  ./qle_adm.sh sync --system --restart
 EX
 
     exhdr "Module management"
@@ -2567,6 +2572,7 @@ main() {
             --wide)     args+=("--wide"); shift ;;
             --boot)     args+=("--boot"); shift ;;
             --restart)  args+=("--restart"); shift ;;
+            --system)   args+=("--system"); shift ;;
             *)          args+=("$1"); shift ;;
         esac
     done

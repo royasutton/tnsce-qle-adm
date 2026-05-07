@@ -165,23 +165,19 @@ sessions are not touched.
 
 `config.json` lives on `/mnt` and survives everything. System files in
 `/etc` (modprobe config, systemd units, scst.conf block) are regenerated
-by `sync`.
+by `sync --system`.
 
 ---
 
 ## After an upgrade or boot environment change
 
 ```bash
-./qle_adm.sh sync
+./qle_adm.sh sync --system --restart
 ./qle_adm.sh status
 ```
 
-`sync` restores all `/etc` files and rebuilds scst.conf from config.json.
-If SCST needs to be restarted to pick up the new scst.conf:
-
-```bash
-systemctl restart scst
-```
+`--system` restores all `/etc` files from config.json. `--restart`
+restarts SCST so it reads the updated scst.conf in one step.
 
 ---
 
@@ -202,8 +198,7 @@ systemctl restart scst
 
 **After upgrade — targets not active:**
 ```bash
-./qle_adm.sh sync
-systemctl restart scst
+./qle_adm.sh sync --system --restart
 ```
 
 ---
