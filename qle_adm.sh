@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.0
+# Version: 2.1
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.0"
+VERSION="2.1"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1007,9 +1007,13 @@ PYEOF
 
 
 cmd_sync() {
-    local boot_mode=0
-    [[ "${1:-}" == "--boot" ]] && boot_mode=1
-    hdr "Sync${boot_mode:+ (boot mode)}"
+    local boot_mode=0 restart_mode=0
+    for arg in "$@"; do
+        [[ "$arg" == "--boot" ]]    && boot_mode=1
+        [[ "$arg" == "--restart" ]] && restart_mode=1
+    done
+
+    hdr "Sync${boot_mode:+ (boot mode)}${restart_mode:+ (restart mode)}"
     cfg_init
 
     local isp_type; isp_type=$(get_isp_type_dominant)
@@ -1068,9 +1072,29 @@ WantedBy=multi-user.target"
             ok "qla2xxx_scst already loaded"
         fi
         ok "Boot sync complete — SCST will initialize FC targets from scst.conf"
+
+    elif [[ $restart_mode -eq 1 ]]; then
+        # Restart the running SCST service so it re-reads the updated scst.conf.
+        # Warn clearly — all active iSCSI and FC sessions will be dropped.
+        local sessions=0
+        for sess_path in /sys/kernel/scst_tgt/targets/*/sessions/*/; do
+            [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
+        done
+        if [[ $sessions -gt 0 ]]; then
+            warn "${sessions} active session(s) will be dropped by the SCST restart"
+        fi
+        warn "sync --restart will restart scst.service — all active sessions will be disconnected"
+        confirm_or_abort "Restart scst.service now?"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            systemctl restart scst
+            ok "scst.service restarted — FC targets initialized from scst.conf"
+        else
+            info "[DRY-RUN] systemctl restart scst"
+        fi
+
     else
         ok "Sync complete — scst.conf updated from config.json"
-        info "Live sysfs state not touched. Restart SCST only if required."
+        info "Live sysfs state not touched. Use 'sync --restart' to restart SCST if required."
     fi
 }
 
@@ -1093,6 +1117,124 @@ cmd_teardown() {
     else
         ok "qla2xxx_scst not loaded"
     fi
+}
+
+cmd_module() {
+    local subcmd="${1:-status}"; shift || true
+    local isp_type; isp_type=$(get_isp_type_dominant)
+    [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
+
+    _module_load() {
+        local params; params=$(get_module_params "$isp_type")
+        local fw_file="${ISP_FW_FILE[$isp_type]:-}"
+        local stored="${FIRMWARE_DIR}/${isp_type}/${fw_file:-}"
+        if [[ -n "$fw_file" && -f "$stored" ]]; then
+            params="${params} ql2xfwloadbin=2"
+            setup_firmware_overlay "$isp_type"
+        fi
+        info "Loading qla2xxx_scst (${isp_type}): ${params}"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            modprobe -r qla2xxx     2>/dev/null || true
+            modprobe -r qla2xxx_scst 2>/dev/null || true
+            sleep 1
+            modprobe qla2xxx_scst $params
+            sleep 3
+            log "module load: qla2xxx_scst params=${params}"
+            ok "qla2xxx_scst loaded"
+        else
+            info "[DRY-RUN] modprobe -r qla2xxx"
+            info "[DRY-RUN] modprobe -r qla2xxx_scst"
+            info "[DRY-RUN] modprobe qla2xxx_scst ${params}"
+        fi
+    }
+
+    _module_unload() {
+        if ! module_loaded "qla2xxx_scst"; then
+            warn "qla2xxx_scst not loaded — nothing to unload"
+            return 0
+        fi
+        local sessions=0
+        for sess_path in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
+            [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
+        done
+        [[ $sessions -gt 0 ]] && warn "${sessions} active FC session(s) will be dropped"
+        confirm_or_abort "Unload qla2xxx_scst and revert to initiator mode?"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            modprobe -r qla2xxx_scst 2>/dev/null || true
+            modprobe qla2xxx qlini_mode=enabled ql2xnvmeenable=0
+            log "module unload: reverted to qla2xxx initiator"
+            ok "Reverted to initiator mode (plain qla2xxx)"
+        else
+            info "[DRY-RUN] modprobe -r qla2xxx_scst"
+            info "[DRY-RUN] modprobe qla2xxx qlini_mode=enabled ql2xnvmeenable=0"
+        fi
+    }
+
+    case "$subcmd" in
+        load)
+            hdr "Module Load"
+            if module_loaded "qla2xxx_scst"; then
+                local applied configured
+                applied=$(get_applied_params)
+                configured=$(get_module_params "$isp_type")
+                if [[ "$applied" == "$configured" ]]; then
+                    ok "qla2xxx_scst already loaded with correct params"
+                    return 0
+                fi
+                warn "qla2xxx_scst loaded but params differ from configured"
+                info "Applied   : ${applied}"
+                info "Configured: ${configured}"
+                confirm_or_abort "Reload module with correct params? Active FC sessions will be dropped."
+            fi
+            _module_load
+            ;;
+        unload)
+            hdr "Module Unload"
+            _module_unload
+            ;;
+        reload)
+            hdr "Module Reload"
+            local sessions=0
+            for sess_path in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
+                [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
+            done
+            [[ $sessions -gt 0 ]] && warn "${sessions} active FC session(s) will be dropped by the reload"
+            confirm_or_abort "Reload qla2xxx_scst? Active FC sessions will be dropped."
+            if module_loaded "qla2xxx_scst"; then
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    modprobe -r qla2xxx_scst 2>/dev/null || true
+                    sleep 1
+                else
+                    info "[DRY-RUN] modprobe -r qla2xxx_scst"
+                fi
+            fi
+            _module_load
+            ;;
+        status)
+            hdr "Module Status"
+            if module_loaded "qla2xxx_scst"; then
+                ok "qla2xxx_scst loaded (target mode)"
+                local applied configured
+                applied=$(get_applied_params)
+                configured=$(get_module_params "$isp_type")
+                echo -e "\n  ${CYN}Applied params:${NC}"
+                echo "  ${applied}"
+                echo -e "\n  ${CYN}Configured params (${isp_type}):${NC}"
+                echo "  ${configured}"
+                if [[ "$applied" == "$configured" ]]; then
+                    echo -e "\n  $(ok "Params match configured")"
+                else
+                    echo -e "\n  $(warn "Params differ from configured — run 'module reload' to resync")"
+                fi
+            elif module_loaded "qla2xxx"; then
+                warn "qla2xxx loaded (initiator mode) — not target mode"
+                info "Run 'module load' to switch to target mode"
+            else
+                err "No QLogic FC module loaded"
+            fi
+            ;;
+        *) err "Unknown subcommand: ${subcmd}  (load|unload|reload|status)" ;;
+    esac
 }
 
 
@@ -2130,7 +2272,7 @@ usage() {
 ${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
 ${DIM}${sep}${NC}
 Deployment   : install  uninstall
-Operation    : sync [--boot]  teardown
+Operation    : sync [--boot|--restart]  teardown  module load|unload|reload|status
                clear <seen|ports|mappings|names|all>
 Status       : status  hba-info  stats [--watch|--wide]  list-all
                list-ports  list-extents  list-initiators [--seen]  list-assignments
@@ -2161,11 +2303,22 @@ ${CYN}Deployment:${NC}
   uninstall                      Remove all installed components
 
 ${CYN}Operation:${NC}
-  sync [--boot]                  Rebuild scst.conf and modprobe config from config.json.
-                                 --boot also loads qla2xxx_scst before SCST starts;
-                                 SCST then reads the reconstructed scst.conf naturally.
-                                 Without --boot: files only, live sysfs state not touched.
-                                 Use after a WUI iSCSI save wiped the FC target block.
+  sync [--boot|--restart]        Rebuild scst.conf and modprobe config from config.json.
+                                 --boot   : also loads qla2xxx_scst; used by boot service.
+                                            SCST reads the reconstructed scst.conf naturally.
+                                 --restart: rebuilds scst.conf then restarts scst.service.
+                                            Warns and confirms before restart — all active
+                                            sessions will be dropped.
+                                 (no flag): files only — live sysfs state not touched.
+                                            Safe at any time. Use after a WUI iSCSI save.
+  module <load|unload|reload|status>
+                                 Manage the qla2xxx_scst kernel module independently
+                                 of the SCST service and configuration files.
+                                 load  : modprobe qla2xxx_scst with configured params.
+                                         Skips if already loaded with matching params.
+                                 unload: modprobe -r qla2xxx_scst, revert to qla2xxx.
+                                 reload: unload then load (applies param changes).
+                                 status: show loaded module, applied vs configured params.
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
   clear <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
@@ -2209,7 +2362,7 @@ ${CYN}Configuration:${NC}
   isp-params set <ISP> [--profile <name>] '<params>'
                                  Create or update a named parameter profile
   isp-params use <ISP> --profile <name>
-                                 Set active profile (used on next sync --boot / module reload)
+                                 Set active profile (used on next module load/reload)
   isp-params del <ISP> [--profile <name>]
                                  Delete a profile, or entire ISP entry if no --profile
 
@@ -2283,6 +2436,27 @@ EX
 
   # Rebuilds scst.conf from config.json.
   # Live sysfs state and active sessions are not touched.
+
+  # To also restart SCST so it re-reads the updated scst.conf:
+  ./qle_adm.sh sync --restart
+  # Warns and confirms before restart — all active sessions will be dropped.
+EX
+
+    exhdr "Module management"
+    cat << 'EX'
+
+  # Load qla2xxx_scst with configured params (skips if already correct)
+  ./qle_adm.sh module load
+
+  # Check loaded vs configured params
+  ./qle_adm.sh module status
+
+  # Reload after an isp-params change
+  ./qle_adm.sh isp-params use ISP2532 --profile optrom
+  ./qle_adm.sh module reload
+
+  # Revert to initiator mode
+  ./qle_adm.sh module unload
 EX
 
     exhdr "Bring up a target port and map a LUN"
@@ -2340,12 +2514,13 @@ EX
   # View current profiles and applied vs configured state
   ./qle_adm.sh isp-params list
 
-  # Add a filesystem-firmware profile
-  ./qle_adm.sh isp-params set ISP2532 --profile fs \
-    "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=2"
+  # Add an optrom-firmware profile
+  ./qle_adm.sh isp-params set ISP2532 --profile optrom \
+    "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
 
-  # Switch active profile
-  ./qle_adm.sh isp-params use ISP2532 --profile fs
+  # Switch active profile then reload module to apply
+  ./qle_adm.sh isp-params use ISP2532 --profile optrom
+  ./qle_adm.sh module reload
 EX
 
     exhdr "Monitoring"
@@ -2391,6 +2566,7 @@ main() {
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
             --boot)     args+=("--boot"); shift ;;
+            --restart)  args+=("--restart"); shift ;;
             *)          args+=("$1"); shift ;;
         esac
     done
@@ -2413,6 +2589,7 @@ main() {
         uninstall)       cmd_uninstall ;;
         sync)            cmd_sync "${rest[@]}" ;;
         teardown)        cmd_teardown ;;
+        module)          cmd_module "${rest[@]}" ;;
         clear)           cmd_clear "${rest[@]}" ;;
         status)          cmd_status ;;
         hba-info)        cmd_hba_info ;;

@@ -76,21 +76,15 @@ export QLE_ADM_HOME=.
 # 1. Make the script executable
 chmod +x ./qle_adm.sh
 
-# 2. Load qla2xxx_scst in target mode
-#    These params are correct for ISP2532 (QLE2562, HP AJ764A).
-#    For other ISP types see: ./qle_adm.sh isp-params list
-modprobe -r qla2xxx
-modprobe qla2xxx_scst qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0
+# 2. Load qla2xxx_scst in target mode.
+#    Params are read from config.json (defaults to ISP2532 on first run).
+#    For other ISP types configure first: ./qle_adm.sh isp-params list
+./qle_adm.sh module load
 
-# 3. Register the FC target driver with SCST by adding the
-#    TARGET_DRIVER block to scst.conf, then restart SCST to read it.
-#    This is the only change made to /etc on this path.
-cat >> /etc/scst.conf << 'EOF'
-
-TARGET_DRIVER qla2x00t {
-}
-EOF
-systemctl restart scst
+# 3. Inject FC target block into scst.conf and restart SCST to read it.
+#    Warns and confirms before restarting — this is the only change
+#    made to /etc on this path.
+./qle_adm.sh sync --restart
 
 # 4. Verify SCST, module, ports, and scst.conf block are all good
 ./qle_adm.sh status

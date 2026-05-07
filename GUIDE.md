@@ -206,7 +206,8 @@ or by full path `/mnt/<pool>/admin/qle_adm/qle_adm.sh <command>`.
 
 | Command | Description |
 |---|---|
-| `sync [--boot]` | Rebuild scst.conf and modprobe config from config.json. `--boot` also loads the module; used by the boot service. Without `--boot`, files only — live sysfs not touched. |
+| `sync [--boot\|--restart]` | Rebuild scst.conf and modprobe config from config.json. `--boot` also loads the module; used by the boot service. `--restart` rebuilds files then restarts scst.service (warns and confirms first — all active sessions will be dropped). Without either flag, files only — live sysfs not touched. |
+| `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
 
@@ -217,6 +218,34 @@ clear ports      : disable all ports and clear enabled_ports
 clear mappings   : remove all open/assigned LUNs from sysfs and config
 clear names      : wipe all WWN names
 clear all        : all of the above (prompts unless --yes)
+```
+
+### Module management
+
+The `module` command manages the `qla2xxx_scst` kernel module independently
+of the SCST service and configuration files. This separation allows module
+state to be managed precisely without affecting scst.conf or restarting SCST.
+
+```bash
+./qle_adm.sh module load      # load with configured params; skip if already correct
+./qle_adm.sh module unload    # remove module, revert to plain qla2xxx initiator
+./qle_adm.sh module reload    # unload then load (applies isp-params changes)
+./qle_adm.sh module status    # show loaded module and applied vs configured params
+```
+
+`module load` checks whether `qla2xxx_scst` is already loaded with the correct
+params. If it is, it exits cleanly. If params differ, it warns and asks before
+reloading. This makes `module load` safe to call idempotently.
+
+`module status` is also surfaced in the `status` command's gap analysis as the
+authoritative source for param drift detection.
+
+**Typical param change workflow:**
+```bash
+./qle_adm.sh isp-params set ISP2532 --profile optrom \
+  "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
+./qle_adm.sh isp-params use ISP2532 --profile optrom
+./qle_adm.sh module reload
 ```
 
 **Retired commands** — these print an informative error and exit:
