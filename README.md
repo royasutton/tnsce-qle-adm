@@ -60,8 +60,8 @@ without touching live sysfs state or active sessions.
 ## Quick Start
 
 Expose an existing ZFS extent to FC initiators without installing
-`qle_adm.sh`. SCST must already be active (verify in the TrueNAS WUI
-under System > Services).
+`qle_adm.sh`. SCST must already be active — verify under System >
+Services in the TrueNAS WUI.
 
 Set `QLE_ADM_HOME` once for the session — all commands below use it:
 
@@ -76,26 +76,38 @@ export QLE_ADM_HOME=.
 # 1. Make the script executable
 chmod +x ./qle_adm.sh
 
-# 2. Load qla2xxx_scst and rebuild scst.conf from config.json
-#    (initializes config.json in the current directory on first run)
-./qle_adm.sh sync --boot
+# 2. Load qla2xxx_scst in target mode
+#    These params are correct for ISP2532 (QLE2562, HP AJ764A).
+#    For other ISP types see: ./qle_adm.sh isp-params list
+modprobe -r qla2xxx
+modprobe qla2xxx_scst qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0
 
-# 3. Verify SCST, module, ports, and scst.conf block are all good
+# 3. Register the FC target driver with SCST by adding the
+#    TARGET_DRIVER block to scst.conf, then restart SCST to read it.
+#    This is the only change made to /etc on this path.
+cat >> /etc/scst.conf << 'EOF'
+
+TARGET_DRIVER qla2x00t {
+}
+EOF
+systemctl restart scst
+
+# 4. Verify SCST, module, ports, and scst.conf block are all good
 ./qle_adm.sh status
 
-# 4. List available extents and note the index [N]
+# 5. List available extents and note the index [N]
 ./qle_adm.sh list-extents
 
-# 5. List FC ports and note the index [N] of the port to use
+# 6. List FC ports and note the index [N] of the port to use
 ./qle_adm.sh list-ports
 
-# 6. Enable the target port
+# 7. Enable the target port
 ./qle_adm.sh port enable --port 0
 
-# 7. Open the extent to all initiators
+# 8. Open the extent to all initiators
 ./qle_adm.sh open --ext 0
 
-# 8. Verify the mapping and confirm the initiator session is active
+# 9. Verify the mapping and confirm the initiator session is active
 ./qle_adm.sh list-assignments
 ./qle_adm.sh list-initiators
 ```

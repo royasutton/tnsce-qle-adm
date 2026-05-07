@@ -897,7 +897,6 @@ cmd_uninstall() {
     info "To fully remove: rm -rf ${QLE_ADM_HOME}"
 }
 
-# ─── scst.conf FC target block ────────────────────────────────────────────────
 # ─── scst.conf FC target block renderer ───────────────────────────────────────
 # Serializes the full TARGET_DRIVER qla2x00t { TARGET ... { GROUP ... } } block
 # from config.json into /etc/scst.conf, replacing any existing block.
@@ -1016,19 +1015,26 @@ cmd_sync() {
     local isp_type; isp_type=$(get_isp_type_dominant)
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
-    # Restore modprobe config if missing (after BE change or upgrade)
-    if [[ ! -f "$MODPROBE_CONF" ]]; then
-        warn "modprobe config missing — restoring"
-        local params; params=$(get_module_params "$isp_type")
-        file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
-    else
-        ok "modprobe config present"
-    fi
+    # Only manage /etc system files when installed to a persistent location.
+    # When running with QLE_ADM_HOME=. (uninstalled), skip modprobe config
+    # and boot service writes — those are install-time concerns only.
+    local is_installed=0
+    [[ "${QLE_ADM_HOME}" == /mnt/* ]] && is_installed=1
 
-    # Restore boot service if missing (after BE change or upgrade)
-    if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
-        warn "qle_adm-boot.service missing — restoring"
-        file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
+    if [[ $is_installed -eq 1 ]]; then
+        # Restore modprobe config if missing (after BE change or upgrade)
+        if [[ ! -f "$MODPROBE_CONF" ]]; then
+            warn "modprobe config missing — restoring"
+            local params; params=$(get_module_params "$isp_type")
+            file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
+        else
+            ok "modprobe config present"
+        fi
+
+        # Restore boot service if missing (after BE change or upgrade)
+        if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
+            warn "qle_adm-boot.service missing — restoring"
+            file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
 Description=qle_adm FC Target Boot Setup
 Before=scst.service
 After=local-fs.target
@@ -1041,9 +1047,12 @@ ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot
 
 [Install]
 WantedBy=multi-user.target"
-        [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload && systemctl enable qle_adm-boot.service
+            [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload && systemctl enable qle_adm-boot.service
+        else
+            ok "qle_adm-boot.service present"
+        fi
     else
-        ok "qle_adm-boot.service present"
+        info "Running uninstalled (QLE_ADM_HOME=${QLE_ADM_HOME}) — skipping modprobe and boot service management"
     fi
 
     # Rebuild scst.conf FC target block from config.json
