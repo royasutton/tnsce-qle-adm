@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.9
+# Version: 2.10
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.9"
+VERSION="2.10"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1504,7 +1504,8 @@ cmd_status() {
         applied=$(get_applied_params)
         configured=$(get_module_params "$isp_type")
         if [[ -n "$applied" && "$applied" != "$configured" ]]; then
-            gap "Module params drift - applied differs from configured (run 'setup' to resync)"            gaps=$((gaps + 1))
+            gap "Module params drift - applied differs from configured (run 'module reload' to resync)"
+            gaps=$((gaps + 1))
         fi
     fi
 
