@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.17
+# Version: 2.18
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.17"
+VERSION="2.18"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1532,10 +1532,16 @@ cmd_status() {
 
     # SCST service
     echo -e "\n${CYN}SCST Service:${NC}"
-    if systemctl is-active scst &>/dev/null; then
+    local scst_sysfs=0
+    [[ -d /sys/kernel/scst_tgt ]] && scst_sysfs=1
+    local scst_systemd=0
+    systemctl is-active scst &>/dev/null && scst_systemd=1
+    if [[ $scst_sysfs -eq 1 && $scst_systemd -eq 1 ]]; then
         ok "scst.service active"
+    elif [[ $scst_sysfs -eq 1 && $scst_systemd -eq 0 ]]; then
+        ok "SCST running (sysfs active; systemd unit reports inactive - may be middleware-managed)"
     else
-        gap "scst.service not running"
+        gap "SCST not running - verify under System > Services in the WUI or run: systemctl start scst"
         gaps=$((gaps + 1))
     fi
 
