@@ -1056,7 +1056,11 @@ cmd_sync() {
     # --boot always implies --system (boot service owns /etc file restoration)
     [[ $boot_mode -eq 1 ]] && system_mode=1
 
-    hdr "Sync${boot_mode:+ (boot)}${restart_mode:+ (restart)}${system_mode:+ (system)}"
+    local mode_label=""
+    [[ $boot_mode    -eq 1 ]] && mode_label+=" (boot)"
+    [[ $restart_mode -eq 1 ]] && mode_label+=" (restart)"
+    [[ $system_mode  -eq 1 ]] && mode_label+=" (system)"
+    hdr "Sync${mode_label}"
     cfg_init
 
     local isp_type; isp_type=$(get_isp_type_dominant)
@@ -2671,6 +2675,15 @@ main() {
     esac
 
     [[ $EUID -ne 0 ]] && { err "qle_adm.sh must be run as root"; exit 1; }
+
+    # All commands except install require QLE_ADM_HOME to be set
+    if [[ -z "${QLE_ADM_HOME}" && "$cmd" != "install" ]]; then
+        err "QLE_ADM_HOME is not set."
+        err "Set it to the directory containing config.json before running:"
+        err "  QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh ${cmd}"
+        err "  QLE_ADM_HOME=. ./qle_adm.sh ${cmd}   (uninstalled, current directory)"
+        exit 1
+    fi
 
     case "$cmd" in
         install)         cmd_install ;;
