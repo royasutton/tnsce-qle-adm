@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.14
+# Version: 2.15
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.14"
+VERSION="2.15"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1058,6 +1058,36 @@ cmd_install() {
     info "Run 'qle_adm.sh status' to check state"
     info "Run 'qle_adm.sh list-extents' to see available devices"
     info "Run 'qle_adm.sh list-ports' to see FC ports"
+
+    # Read back and display the registered POSTINIT entry from middleware
+    if [[ $DRY_RUN -eq 0 ]]; then
+        local entry_id; entry_id=$(cfg_get 'initscript_id' '')
+        if [[ -n "$entry_id" ]]; then
+            local entry
+            entry=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+import json, sys
+for e in json.load(sys.stdin):
+    if str(e.get('id','')) == '${entry_id}':
+        print(json.dumps(e))
+        break
+" 2>/dev/null)
+            if [[ -n "$entry" ]]; then
+                echo ""
+                echo -e "  ${CYN}Registered boot entry:${NC}"
+                python3 -c "
+import json, sys
+e = json.loads(sys.argv[1])
+print(f\"  {'ID':<12} {e['id']}\")
+print(f\"  {'When':<12} {e['when']}\")
+print(f\"  {'Type':<12} {e['type']}\")
+print(f\"  {'Enabled':<12} {e['enabled']}\")
+print(f\"  {'Timeout':<12} {e['timeout']}s\")
+print(f\"  {'Comment':<12} {e['comment']}\")
+print(f\"  {'Command':<12} {e['command']}\")
+" "$entry" 2>/dev/null
+            fi
+        fi
+    fi
     divider
 }
 
