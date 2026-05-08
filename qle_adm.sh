@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.2
+# Version: 2.3
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.2"
+VERSION="2.3"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -87,7 +87,46 @@ hbar() {
     printf '%s' "$bar"
 }
 
-hdr()  { echo -e "\n${WHT}$*${NC}"; echo -e "${DIM}$(hbar)${NC}"; }
+# divider - prints a plain full-width +---...---+ rule.
+# Suppressed when _LIST_ALL_MODE=1 so list-all can emit a single final divider.
+divider() {
+    [[ "${_LIST_ALL_MODE:-0}" == "1" ]] && return
+    local w; w=$(terminal_width)
+    local inner=$(( w - 2 ))
+    local bar="" i=0
+    while [[ $i -lt $inner ]]; do bar+="${SYM_HBAR}"; i=$((i+1)); done
+    echo "+${bar}+"
+}
+
+_divider_force() {
+    local w; w=$(terminal_width)
+    local inner=$(( w - 2 ))
+    local bar="" i=0
+    while [[ $i -lt $inner ]]; do bar+="${SYM_HBAR}"; i=$((i+1)); done
+    echo "+${bar}+"
+}
+
+# hdr - box-style heading:
+#   +----...----+
+#   | heading   |
+#   +----...----+
+hdr() {
+    local title="$*"
+    local w; w=$(terminal_width)
+    local inner=$(( w - 2 ))   # columns between the + signs
+    local bar="" i=0
+    while [[ $i -lt $inner ]]; do bar+="${SYM_HBAR}"; i=$((i+1)); done
+    local border="+${bar}+"
+    # Pad title to fill inner width:  "| title<spaces> |"
+    local tlen=${#title}
+    local pad=$(( inner - 2 - tlen ))   # 2 for the leading "  " space after |
+    [[ $pad -lt 0 ]] && pad=0
+    local spaces="" j=0
+    while [[ $j -lt $pad ]]; do spaces+=" "; j=$((j+1)); done
+    echo -e "${DIM}${border}${NC}"
+    echo -e "${WHT}| ${title}${spaces} |${NC}"
+    echo -e "${DIM}${border}${NC}"
+}
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null || true; }
 
 # ─── Python JSON helpers ───────────────────────────────────────────────────────
@@ -909,6 +948,7 @@ WantedBy=multi-user.target"
     info "Run 'qle_adm.sh status' to check state"
     info "Run 'qle_adm.sh list-extents' to see available devices"
     info "Run 'qle_adm.sh list-ports' to see FC ports"
+    divider
 }
 
 cmd_uninstall() {
@@ -930,6 +970,7 @@ cmd_uninstall() {
 
     ok "Uninstall complete. Config preserved at ${QLE_ADM_HOME}"
     info "To fully remove: rm -rf ${QLE_ADM_HOME}"
+    divider
 }
 
 # ─── scst.conf FC target block renderer ───────────────────────────────────────
@@ -1144,6 +1185,7 @@ WantedBy=multi-user.target"
         ok "Sync complete - scst.conf updated from config.json"
         info "Live sysfs state not touched. Use 'sync --restart' to restart SCST if required."
     fi
+    divider
 }
 
 cmd_teardown() {
@@ -1165,6 +1207,7 @@ cmd_teardown() {
     else
         ok "qla2xxx_scst not loaded"
     fi
+    divider
 }
 
 cmd_module() {
@@ -1227,6 +1270,7 @@ cmd_module() {
                 configured=$(get_module_params "$isp_type")
                 if [[ "$applied" == "$configured" ]]; then
                     ok "qla2xxx_scst already loaded with correct params"
+                    divider
                     return 0
                 fi
                 warn "qla2xxx_scst loaded but params differ from configured"
@@ -1235,10 +1279,12 @@ cmd_module() {
                 confirm_or_abort "Reload module with correct params? Active FC sessions will be dropped."
             fi
             _module_load
+            divider
             ;;
         unload)
             hdr "Module Unload"
             _module_unload
+            divider
             ;;
         reload)
             hdr "Module Reload"
@@ -1257,6 +1303,7 @@ cmd_module() {
                 fi
             fi
             _module_load
+            divider
             ;;
         status)
             hdr "Module Status"
@@ -1297,6 +1344,7 @@ cmd_module() {
             else
                 err "No QLogic FC module loaded"
             fi
+            divider
             ;;
         *) err "Unknown subcommand: ${subcmd}  (load|unload|reload|status)" ;;
     esac
@@ -1308,6 +1356,15 @@ cmd_module() {
 cmd_status() {
     hdr "qle_adm Status v${VERSION}"
     cfg_init
+
+    # QLE_ADM_HOME display
+    echo -e "\n${CYN}Home:${NC}"
+    if [[ -n "${QLE_ADM_HOME}" ]]; then
+        echo -e "  QLE_ADM_HOME = ${WHT}${QLE_ADM_HOME}${NC}"
+    else
+        echo -e "  QLE_ADM_HOME = ${YLW}(not set)${NC}"
+        warn "QLE_ADM_HOME is not set - persistent state will not survive reboots"
+    fi
 
     local gaps=0
 
@@ -1421,6 +1478,7 @@ cmd_status() {
     else
         warn "${gaps} gap(s) detected - run 'qle_adm.sh sync' to fix"
     fi
+    divider
 }
 
 cmd_hba_info() {
@@ -1479,13 +1537,18 @@ cmd_hba_info() {
         echo -e "  PCIe Cap   : ${pci_lnkcap_speed} ${pci_lnkcap_width}"
         echo -e "  PCIe Link  : ${pci_lnksta_speed} ${pci_lnksta_width}${pci_downgraded}"
     done
+    divider
 }
 
 cmd_list_all() {
+    # Run all four list commands with per-command dividers suppressed;
+    # print a single divider at the very end.
+    local _LIST_ALL_MODE=1
     cmd_list_ports
     cmd_list_extents
-    cmd_list_initiators --seen
+    cmd_list_initiators
     cmd_list_assignments
+    _divider_force
 }
 
 cmd_list_ports() {
@@ -1500,6 +1563,7 @@ cmd_list_ports() {
         local label; label=$(wwn_label "$wwn" "target")
         echo -e "  [${idx}] ${WHT}${wwn}${NC} (${CYN}${label}${NC})  ${isp}  ${host}  ${state_col}${state}${NC}  ${ptype_short}  [${managed}]"
     done
+    divider
 }
 
 cmd_list_extents() {
@@ -1521,18 +1585,31 @@ except: pass
 ")
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size=""
-        [[ -d "$dev_path" ]] && size=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "") && \
-            [[ -n "$size" ]] && size="${size} MB"
+        if [[ -d "$dev_path" ]]; then
+            local size_mb_raw; size_mb_raw=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "")
+            if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
+                size=$(python3 -c "
+mb = int('${size_mb_raw}')
+kib = mb * 1024
+mib = mb
+gib = mb / 1024.0
+if gib >= 1.0:
+    print(f'{gib:6.2f} GiB')
+elif mib >= 1:
+    print(f'{mib:6.2f} MiB')
+else:
+    print(f'{kib:6.2f} KiB')
+" 2>/dev/null || echo "${size_mb_raw} MB")
+            fi
+        fi
         echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}${assigned:+  ${CYN}${assigned}${NC}}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
     [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in /etc/scst.conf${NC}" || true
+    divider
 }
 
 cmd_list_initiators() {
-    local show_seen=0
-    [[ "${1:-}" == "--seen" ]] && show_seen=1
-
     hdr "Initiators"
 
     echo -e "\n${CYN}Connected:${NC}"
@@ -1559,10 +1636,9 @@ cmd_list_initiators() {
     done
     [[ $found -eq 0 ]] && echo -e "  ${DIM}(none)${NC}" || true
 
-    if [[ $show_seen -eq 1 ]]; then
-        echo -e "\n${CYN}Previously Seen:${NC}"
-        local seen_list
-        seen_list=$(py_json "
+    echo -e "\n${CYN}Previously Seen:${NC}"
+    local seen_list
+    seen_list=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
@@ -1571,15 +1647,15 @@ try:
         print(f'{wwn} {ts}')
 except: pass
 ")
-        if [[ -z "$seen_list" ]]; then
-            echo -e "  ${DIM}(none recorded)${NC}"
-        else
-            while IFS=' ' read -r wwn ts; do
-                local lbl; lbl=$(wwn_label "$wwn" "initiator")
-                echo -e "  ${wwn} (${CYN}${lbl}${NC})  last seen: ${ts}"
-            done <<< "$seen_list"
-        fi
+    if [[ -z "$seen_list" ]]; then
+        echo -e "  ${DIM}(none recorded)${NC}"
+    else
+        while IFS=' ' read -r wwn ts; do
+            local lbl; lbl=$(wwn_label "$wwn" "initiator")
+            echo -e "  ${wwn} (${CYN}${lbl}${NC})  last seen: ${ts}"
+        done <<< "$seen_list"
     fi
+    divider
 }
 
 cmd_list_assignments() {
@@ -1622,6 +1698,7 @@ except: pass
             done
         done <<< "$init_list"
     fi
+    divider
 }
 
 cmd_port_enable() {
@@ -1922,9 +1999,9 @@ cmd_stats() {
     done
 
     _show_stats_wide() {
+        hdr "qle_adm Stats  $(date '+%Y-%m-%d %H:%M:%S')"
         printf "\n${WHT}%-25s %-8s %-10s %-8s  %-12s %-12s %-8s %-8s %-8s${NC}\n" \
             "WWN" "ISP" "State" "Speed" "TX Frames" "RX Frames" "LnkFail" "LossSig" "BadCRC"
-        printf "${DIM}%s${NC}\n" "$(printf '─%.0s' {1..110})"
         detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
             local stats_path="/sys/class/fc_host/${host}/statistics"
             local tx=0 rx=0 lf=0 ls=0 crc=0 speed
@@ -1955,12 +2032,12 @@ cmd_stats() {
                 i=$((i + 1))
             done
         done
+        divider
     }
 
     _show_stats_detail() {
         clear
-        echo -e "${WHT}qle_adm stats${NC}  $(date '+%Y-%m-%d %H:%M:%S')"
-        echo -e "${DIM}$(printf '─%.0s' {1..60})${NC}"
+        hdr "qle_adm Stats  $(date '+%Y-%m-%d %H:%M:%S')"
         detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
             local state_col="$RED"; [[ "$state" == "Online" ]] && state_col="$GRN"
             local ptype_short; ptype_short=$(echo "$ptype" | sed 's/Point-To-Point (direct nport connection)/P2P/')
@@ -2000,6 +2077,7 @@ cmd_stats() {
             done
         done
         [[ $watch_mode -eq 1 ]] && echo -e "\n${DIM}Refreshing every ${WATCH_INTERVAL}s - Ctrl+C to stop${NC}"
+        divider
     }
 
     if [[ $wide_mode -eq 1 ]]; then
@@ -2030,6 +2108,7 @@ cmd_fw() {
                 fi
             done
             [[ $found -eq 0 ]] && echo -e "  ${DIM}(none stored)${NC}" || true
+            divider
             ;;
         add)
             local isp_type="${1:-}" fw_path="${2:-}"
@@ -2077,6 +2156,7 @@ cmd_fw() {
             else
                 info "[DRY-RUN] would: echo 1 > ${optrom_ctl} && dd ${optrom_path} ${SYM_INFO} ${dest} && echo 0 > ${optrom_ctl}"
             fi
+            divider
             ;;
         show)
             local port_idx=""
@@ -2114,6 +2194,7 @@ cmd_fw() {
                 fi
                 echo -e "    Load src : ql2xfwloadbin=${fwbin_val} (${fwbin_label})"
             done
+            divider
             ;;
         status)
             hdr "Firmware Status"
@@ -2133,6 +2214,7 @@ cmd_fw() {
                 fi
                 echo -e "  ${sync_ind} ${host}  ${isp}  ${wwn} (${CYN}${lbl}${NC})  running=${fw}  optrom=${optrom_ver}  stored=${stored_ver:-none}"
             done
+            divider
             ;;
         flash)
             local slot="" port_idx="" fw_src="" do_yes=0
@@ -2204,6 +2286,7 @@ cmd_fw() {
             else
                 info "[DRY-RUN] would run: ${flash_bin} --slot ${slot} --port ${host} ${fw_src}"
             fi
+            divider
             ;;
         *) err "Unknown fw subcommand: ${subcmd}" ;;
     esac
@@ -2256,6 +2339,7 @@ for isp, entry in d.get('isp_params', {}).items():
             else:
                 print(f'    Applied    : {applied}  ⚠ drift')
 "
+            divider
             ;;
         set)
             # isp-params set <ISP> [--profile <name>] <params>
@@ -2355,7 +2439,7 @@ Status       : status
                stats  [--watch] [--wide]
                list-ports
                list-extents
-               list-initiators  [--seen]
+               list-initiators
                list-assignments
                list-all
 
@@ -2426,7 +2510,7 @@ ${CYN}Status:${NC}
   stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
   list-ports                     FC ports with managed/unmanaged state and index [N]
   list-extents                   SCST extents with size, open/assigned state, index [N]
-  list-initiators [--seen]       Connected initiators with IO stats; --seen adds history
+  list-initiators                Connected initiators with IO stats; seen history always shown
   list-assignments               Per-initiator LUN mappings
   list-all                       Runs all four list commands in sequence
 
@@ -2495,26 +2579,9 @@ HELP_EOF
 }
 
 cmd_examples() {
-    # Full-width section heading helper
-    exhdr() {
-        local title=" $* "
-        local w; w=$(terminal_width)
-        local tlen=${#title}
-        local remain=$(( w - tlen - 2 ))
-        local left=$(( remain / 2 ))
-        local right=$(( remain - left ))
-        local lbar="" rbar="" i=0
-        while [[ $i -lt $left  ]]; do lbar+="${SYM_HBAR}"; i=$((i+1)); done
-        i=0
-        while [[ $i -lt $right ]]; do rbar+="${SYM_HBAR}"; i=$((i+1)); done
-        echo -e "${CYN}${lbar}${title}${rbar}${NC}"
-    }
+    hdr "qle_adm.sh v${VERSION} - Examples"
 
-    echo ""
-    echo -e "${WHT}qle_adm.sh${NC} v${VERSION} - Examples"
-    echo ""
-
-    exhdr "First-time install"
+    hdr "First-time install"
     cat << 'EX'
 
   # Deploy boot service and modprobe config
@@ -2523,8 +2590,9 @@ cmd_examples() {
   # Verify state after install
   ./qle_adm.sh status
 EX
+    divider
 
-    exhdr "Sync config.json to scst.conf"
+    hdr "Sync config.json to scst.conf"
     cat << 'EX'
 
   # After a WUI iSCSI save that wiped the FC target block (scst.conf only):
@@ -2539,8 +2607,9 @@ EX
   # After a BE change or upgrade - restore /etc files AND restart SCST:
   ./qle_adm.sh sync --system --restart
 EX
+    divider
 
-    exhdr "Module management"
+    hdr "Module management"
     cat << 'EX'
 
   # Load qla2xxx_scst with configured params (skips if already correct)
@@ -2556,8 +2625,9 @@ EX
   # Revert to initiator mode
   ./qle_adm.sh module unload
 EX
+    divider
 
-    exhdr "Bring up a target port and map a LUN"
+    hdr "Bring up a target port and map a LUN"
     cat << 'EX'
 
   # See available ports and extents
@@ -2572,8 +2642,9 @@ EX
   # Or assign to a specific initiator only
   ./qle_adm.sh assign --ext 0 --init 0
 EX
+    divider
 
-    exhdr "Name your ports and initiators"
+    hdr "Name your ports and initiators"
     cat << 'EX'
 
   # Name local target ports (port index auto-detected from PCI function)
@@ -2588,8 +2659,9 @@ EX
   ./qle_adm.sh name list
   ./qle_adm.sh list-initiators
 EX
+    divider
 
-    exhdr "Firmware management"
+    hdr "Firmware management"
     cat << 'EX'
 
   # Save optrom firmware from card to store
@@ -2605,8 +2677,9 @@ EX
   # Flash stored firmware to card (requires qlflash)
   ./qle_adm.sh fw flash --slot primary --yes
 EX
+    divider
 
-    exhdr "ISP parameter profiles"
+    hdr "ISP parameter profiles"
     cat << 'EX'
 
   # View current profiles and applied vs configured state
@@ -2620,8 +2693,9 @@ EX
   ./qle_adm.sh isp-params use ISP2532 --profile optrom
   ./qle_adm.sh module reload
 EX
+    divider
 
-    exhdr "Monitoring"
+    hdr "Monitoring"
     cat << 'EX'
 
   # Live IO stats (refreshes every 2s)
@@ -2633,15 +2707,16 @@ EX
   # Full status with gap analysis
   ./qle_adm.sh status
 EX
+    divider
 
-    exhdr "Dry-run any operation"
+    hdr "Dry-run any operation"
     cat << 'EX'
 
   ./qle_adm.sh --dry-run sync
   ./qle_adm.sh --dry-run fw save
   ./qle_adm.sh --dry-run assign --ext 0 --init 0
 EX
-    echo ""
+    divider
 }
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
@@ -2660,7 +2735,6 @@ main() {
             --port)     opt_port="$2"; shift 2 ;;
             --init)     opt_init="$2"; shift 2 ;;
             --ext)      opt_ext="$2"; shift 2 ;;
-            --seen)     args+=("--seen"); shift ;;
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
             --boot)     args+=("--boot"); shift ;;
