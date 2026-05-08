@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.13
+# Version: 2.14
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.13"
+VERSION="2.14"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -923,7 +923,7 @@ for e in entries:
 
 # Create or update the POSTINIT entry. Prints the id on success.
 initscript_install() {
-    local cmd="${QLE_ADM_HOME}/qle_adm.sh sync --boot --system"
+    local cmd="QLE_ADM_HOME=${QLE_ADM_HOME} ${QLE_ADM_HOME}/qle_adm.sh sync --boot --system"
     local existing_id; existing_id=$(initscript_find_id)
 
     if [[ -n "$existing_id" ]]; then
