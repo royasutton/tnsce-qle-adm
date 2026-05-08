@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.3
+# Version: 2.4
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.3"
+VERSION="2.4"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1481,7 +1481,7 @@ cmd_status() {
     divider
 }
 
-cmd_hba_info() {
+cmd_list_hba() {
     hdr "HBA Information"
     detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
         local scsi_host="/sys/class/scsi_host/${host}"
@@ -1541,9 +1541,10 @@ cmd_hba_info() {
 }
 
 cmd_list_all() {
-    # Run all four list commands with per-command dividers suppressed;
+    # Run all five list commands with per-command dividers suppressed;
     # print a single divider at the very end.
     local _LIST_ALL_MODE=1
+    cmd_list_hba
     cmd_list_ports
     cmd_list_extents
     cmd_list_initiators
@@ -2420,12 +2421,8 @@ if '${profile}' in entry:
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
 usage() {
-    local w; w=$(terminal_width)
-    local sep; sep=$(printf '─%.0s' $(seq 1 "$w"))
+    hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
-
-${WHT}qle_adm.sh${NC} v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE
-${DIM}${sep}${NC}
 Deployment   : install
                uninstall
 
@@ -2435,8 +2432,8 @@ Operation    : sync [--boot] [--restart] [--system]
                clear  seen | ports | mappings | names | all
 
 Status       : status
-               hba-info
                stats  [--watch] [--wide]
+               list-hba
                list-ports
                list-extents
                list-initiators
@@ -2459,16 +2456,14 @@ WWN Names    : name  list | set | get | del
 Global       : --dry-run  --yes  --verbose  --home <path>
                --port N   --init N   --ext N
                help  examples  version
-${DIM}${sep}${NC}
-${DIM}Config: ${QLE_ADM_HOME}/config.json  |  Log: ${LOG}${NC}
-
 USAGE_EOF
 )"
+    printf "%b\n" "${DIM}Config: ${QLE_ADM_HOME}/config.json  |  Log: ${LOG}${NC}"
+    divider
 }
 cmd_help() {
+    hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << HELP_EOF
-
-${WHT}qle_adm.sh${NC} v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE
 
 ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before use:
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
@@ -2506,13 +2501,13 @@ ${CYN}Operation:${NC}
 ${CYN}Status:${NC}
   status                         Full state: modules, ports, sessions, gap analysis.
                                  Passively captures seen_initiators from active sessions.
-  hba-info                       Per-port detail: ISP type, firmware, PCI link, WWN
   stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
+  list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN
   list-ports                     FC ports with managed/unmanaged state and index [N]
   list-extents                   SCST extents with size, open/assigned state, index [N]
   list-initiators                Connected initiators with IO stats; seen history always shown
   list-assignments               Per-initiator LUN mappings
-  list-all                       Runs all four list commands in sequence
+  list-all                       Runs all five list commands in sequence
 
 ${CYN}Port Management:${NC}
   port enable  <wwn>|--port N    Write enabled=1 to SCST sysfs, save to config
@@ -2530,7 +2525,7 @@ ${CYN}Firmware:${NC}
   fw list                        List firmware files in ${FIRMWARE_DIR}
   fw add <ISP> <file>            Copy file into firmware store
   fw remove <ISP>                Remove stored file for ISP type
-  fw save [--port N]             Read optrom via optrom_ctl sysfs → save to store
+  fw save [--port N]             Read optrom via optrom_ctl sysfs - save to store
   fw show [--port N]             Per-port: running, primary, optrom, stored versions
   fw status                      One-line summary per port with sync indicator
   fw flash --slot <primary|optrom> [--port N] [--file <path>] [--yes]
@@ -2576,9 +2571,14 @@ Flash:  ${FLASH_TOOL}${NC}
 
 HELP_EOF
 )"
+    divider
 }
 
 cmd_examples() {
+    # Section headings use hdr(); per-section dividers are suppressed via
+    # _LIST_ALL_MODE so only a single closing divider appears at the very end.
+    local _LIST_ALL_MODE=1
+
     hdr "qle_adm.sh v${VERSION} - Examples"
 
     hdr "First-time install"
@@ -2590,7 +2590,6 @@ cmd_examples() {
   # Verify state after install
   ./qle_adm.sh status
 EX
-    divider
 
     hdr "Sync config.json to scst.conf"
     cat << 'EX'
@@ -2607,7 +2606,6 @@ EX
   # After a BE change or upgrade - restore /etc files AND restart SCST:
   ./qle_adm.sh sync --system --restart
 EX
-    divider
 
     hdr "Module management"
     cat << 'EX'
@@ -2625,7 +2623,6 @@ EX
   # Revert to initiator mode
   ./qle_adm.sh module unload
 EX
-    divider
 
     hdr "Bring up a target port and map a LUN"
     cat << 'EX'
@@ -2642,7 +2639,6 @@ EX
   # Or assign to a specific initiator only
   ./qle_adm.sh assign --ext 0 --init 0
 EX
-    divider
 
     hdr "Name your ports and initiators"
     cat << 'EX'
@@ -2659,7 +2655,6 @@ EX
   ./qle_adm.sh name list
   ./qle_adm.sh list-initiators
 EX
-    divider
 
     hdr "Firmware management"
     cat << 'EX'
@@ -2677,7 +2672,6 @@ EX
   # Flash stored firmware to card (requires qlflash)
   ./qle_adm.sh fw flash --slot primary --yes
 EX
-    divider
 
     hdr "ISP parameter profiles"
     cat << 'EX'
@@ -2693,7 +2687,6 @@ EX
   ./qle_adm.sh isp-params use ISP2532 --profile optrom
   ./qle_adm.sh module reload
 EX
-    divider
 
     hdr "Monitoring"
     cat << 'EX'
@@ -2707,7 +2700,6 @@ EX
   # Full status with gap analysis
   ./qle_adm.sh status
 EX
-    divider
 
     hdr "Dry-run any operation"
     cat << 'EX'
@@ -2716,7 +2708,7 @@ EX
   ./qle_adm.sh --dry-run fw save
   ./qle_adm.sh --dry-run assign --ext 0 --init 0
 EX
-    divider
+    _divider_force
 }
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
@@ -2774,8 +2766,8 @@ main() {
         module)          cmd_module "${rest[@]}" ;;
         clear)           cmd_clear "${rest[@]}" ;;
         status)          cmd_status ;;
-        hba-info)        cmd_hba_info ;;
         stats)           cmd_stats "${rest[@]}" ;;
+        list-hba)        cmd_list_hba ;;
         list-ports)      cmd_list_ports ;;
         list-extents)    cmd_list_extents ;;
         list-initiators) cmd_list_initiators "${rest[@]}" ;;
