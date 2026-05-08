@@ -65,27 +65,19 @@ Expose an existing ZFS extent to FC initiators without installing
 `qle_adm.sh`. SCST must already be active - verify under System >
 Services in the TrueNAS WUI.
 
-Set `QLE_ADM_HOME` once for the session - all commands below use it:
-
 ```bash
-export QLE_ADM_HOME=.
-```
+git clone https://github.com/royasutton/tnsce-qle-adm.git
 
-> When you are ready to make this persistent, update `QLE_ADM_HOME` to
-> a dataset under `/mnt` before running `install`.
+cd tnsce-qle-adm
+export QLE_ADM_HOME=$(pwd)/tnsce-qle-adm
 
-```bash
 # 1. Make the script executable
 chmod +x ./qle_adm.sh
 
 # 2. Load qla2xxx_scst in target mode.
-#    Params are read from config.json (defaults to ISP2532 on first run).
-#    For other ISP types configure first: ./qle_adm.sh isp-params list
 ./qle_adm.sh module load
 
 # 3. Inject FC target block into scst.conf and restart SCST to read it.
-#    Warns and confirms before restarting - this is the only change
-#    made to /etc on this path.
 ./qle_adm.sh sync --restart
 
 # 4. Verify SCST, module, ports, and scst.conf block are all good
@@ -121,7 +113,7 @@ ready to make this configuration persistent across reboots, see
 QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 
 # 2. Verify the HBA is detected and identify the P2P port index
-./qle_adm.sh hba-info
+./qle_adm.sh list-hba
 ./qle_adm.sh list-ports
 
 # 3. Enable the P2P target port (use index from list-ports)
@@ -144,34 +136,6 @@ SCST then reads the reconstructed scst.conf naturally.
 
 ---
 
-## After a WUI iSCSI save
-
-The WUI rewrites scst.conf and wipes the FC target block. Rebuild it:
-
-```bash
-./qle_adm.sh sync
-```
-
-This rebuilds scst.conf from config.json. Live sysfs state and active
-sessions are not touched.
-
----
-
-## What survives what
-
-| Location | Reboot | BE change | Upgrade |
-|---|---|---|---|
-| `/mnt/<pool>/` | ✓ | ✓ | ✓ |
-| `/etc/` | ✓ | ✗ wiped | ✗ wiped |
-| `/root/` | ✓ | ✗ wiped | ✗ wiped |
-| `/run/` | ✗ tmpfs | ✗ | ✗ |
-
-`config.json` lives on `/mnt` and survives everything. System files in
-`/etc` (modprobe config, systemd units, scst.conf block) are regenerated
-by `sync --system`.
-
----
-
 ## After an upgrade or boot environment change
 
 ```bash
@@ -189,7 +153,7 @@ restarts SCST so it reads the updated scst.conf in one step.
 **Link won't come up:**
 ```bash
 ./qle_adm.sh status
-./qle_adm.sh hba-info
+./qle_adm.sh list-hba
 ./qle_adm.sh isp-params list
 ```
 

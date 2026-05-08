@@ -266,8 +266,8 @@ authoritative source for param drift detection.
 | Command | Description |
 |---|---|
 | `status` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
-| `hba-info` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `stats [--watch] [--wide]` | IO counters and link error stats |
+| `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | FC ports with index, state, topology, managed status |
 | `list-extents` | SCST extents with size, open/assigned state |
 | `list-initiators [--seen]` | Connected initiators; `--seen` adds history |
@@ -503,7 +503,7 @@ Output throughout the tool then shows:
 
 ```bash
 ./qle_adm.sh status
-./qle_adm.sh hba-info
+./qle_adm.sh list-hba
 ./qle_adm.sh isp-params list
 dmesg | grep qla2xxx | tail -20
 ```
