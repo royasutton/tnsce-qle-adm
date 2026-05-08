@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.10
+# Version: 2.11
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.10"
+VERSION="2.11"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1555,7 +1555,7 @@ cmd_status() {
     if [[ $gaps -eq 0 ]]; then
         ok "No gaps detected - system fully operational"
     else
-        warn "${gaps} gap(s) detected - run 'qle_adm.sh sync' to fix"
+        warn "${gaps} gap(s) detected - review GAP lines above for remediation"
     fi
     divider
 }
