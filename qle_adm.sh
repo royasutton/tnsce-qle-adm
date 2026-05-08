@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.12
+# Version: 2.13
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.12"
+VERSION="2.13"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1378,16 +1378,26 @@ cmd_module() {
                 [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
             done
             [[ $sessions -gt 0 ]] && warn "${sessions} active FC session(s) will be dropped by the reload"
-            confirm_or_abort "Reload qla2xxx_scst? Active FC sessions will be dropped."
-            if module_loaded "qla2xxx_scst"; then
-                if [[ $DRY_RUN -eq 0 ]]; then
-                    modprobe -r qla2xxx_scst 2>/dev/null || true
+            confirm_or_abort "Reload qla2xxx_scst? SCST will be stopped - all active FC and iSCSI sessions will be dropped."
+            if [[ $DRY_RUN -eq 0 ]]; then
+                info "Stopping scst.service to release module reference count"
+                systemctl stop scst 2>/dev/null || true
+                sleep 1
+                if module_loaded "qla2xxx_scst"; then
+                    modprobe -r qla2xxx_scst 2>/dev/null || \
+                        warn "modprobe -r qla2xxx_scst failed - module may still be in use"
                     sleep 1
-                else
-                    info "[DRY-RUN] modprobe -r qla2xxx_scst"
                 fi
+                _module_load
+                info "Starting scst.service"
+                systemctl start scst 2>/dev/null || \
+                    warn "scst.service failed to start - check 'systemctl status scst'"
+            else
+                info "[DRY-RUN] systemctl stop scst"
+                info "[DRY-RUN] modprobe -r qla2xxx_scst"
+                _module_load
+                info "[DRY-RUN] systemctl start scst"
             fi
-            _module_load
             divider
             ;;
         status)
