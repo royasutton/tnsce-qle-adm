@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.9: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.18: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -155,7 +155,13 @@ chmod +x ${QLE_ADM_HOME}/qle_adm.sh
 # Run install - registers POSTINIT boot entry and writes modprobe config
 ${QLE_ADM_HOME}/qle_adm.sh --yes install
 
-# Verify
+# Inject FC target block into scst.conf before loading the module
+${QLE_ADM_HOME}/qle_adm.sh sync
+
+# Load the module - SCST reads the FC target block on module registration
+${QLE_ADM_HOME}/qle_adm.sh module load
+
+# Verify - confirm no gaps before proceeding
 ${QLE_ADM_HOME}/qle_adm.sh status
 ```
 
@@ -245,6 +251,10 @@ state to be managed precisely without affecting scst.conf or restarting SCST.
 `module load` checks whether `qla2xxx_scst` is already loaded with the correct
 params. If it is, it exits cleanly. If params differ, it warns and asks before
 reloading. This makes `module load` safe to call idempotently.
+
+`module reload` stops `scst.service`, unloads the module, reloads it with
+the new params, then starts `scst.service` again. All active FC and iSCSI
+sessions are dropped. The confirmation prompt states this explicitly.
 
 `module status` is also surfaced in the `status` command's gap analysis as the
 authoritative source for param drift detection.
@@ -520,7 +530,7 @@ Common causes and fixes:
 | `port_state: Linkdown` on both sides | Wrong `qlini_mode` | Ensure `qlini_mode=dual` for ISP2532 target |
 | `LOOP UP detected` instead of `Online P2P` | Loop topology negotiated | Both sides must use P2P capable firmware |
 | AEN `8017 d17f` flood | No optical signal | Check SFP seating, cable, correct port |
-| `port_type: Unknown` after enable | SCST not running or `qla2x00tgt` not registered | Check `systemctl status scst`, run `sync` then `systemctl restart scst` |
+| `port_type: Unknown` after enable | SCST not running or `qla2x00tgt` not registered | Check `systemctl status scst`, run `sync --restart` |
 | Both sides `Linkdown` after module reload | Firmware version mismatch | Check `fw show` |
 
 ### AEN error code reference
@@ -772,7 +782,8 @@ but SCST does not re-read it until the next restart.
     "aa:bb:cc:dd:ee:ff:00:02": {"name": "nas0", "role": "target", "port": 1},
     "aa:bb:cc:dd:ee:ff:00:10": {"name": "workstation", "role": "initiator", "port": 0}
   },
-  "firmware": {}
+  "firmware": {},
+  "initscript_id": 4
 }
 ```
 
@@ -786,6 +797,7 @@ but SCST does not re-read it until the next restart.
 | `isp_active_profile` | Currently selected profile per ISP type |
 | `wwn_names` | Friendly names, roles, and port indices for WWNs |
 | `firmware` | Reserved for firmware metadata |
+| `initscript_id` | TrueNAS middleware id of the registered POSTINIT boot entry. Used by `uninstall` to remove the entry without a comment search. |
 
 ---
 
