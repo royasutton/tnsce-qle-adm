@@ -123,10 +123,11 @@ QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 ./qle_adm.sh status
 ```
 
-From this point the configuration is persistent. On every boot,
-`qle_adm-boot.service` runs `sync --boot --system` before SCST starts, which
-restores /etc files, rebuilds scst.conf from config.json, and loads the module.
-SCST then reads the reconstructed scst.conf naturally.
+From this point the configuration is persistent. On every boot, the TrueNAS
+POSTINIT init script registered by `install` runs `sync --boot --system`
+before SCST starts - rebuilding scst.conf from config.json and loading the
+module. The entry is visible and manageable under System > Advanced >
+Init/Shutdown Scripts in the WUI.
 
 ---
 
@@ -137,8 +138,10 @@ SCST then reads the reconstructed scst.conf naturally.
 ./qle_adm.sh status
 ```
 
-`--system` restores all `/etc` files from config.json. `--restart`
-restarts SCST so it reads the updated scst.conf in one step.
+`--system` restores the modprobe config in `/etc` from config.json. `--restart`
+restarts SCST so it reads the updated scst.conf in one step. The POSTINIT boot
+entry in the TrueNAS middleware database is unaffected by upgrades and BE
+changes - no reinstall is needed.
 
 ---
 
@@ -161,6 +164,36 @@ restarts SCST so it reads the updated scst.conf in one step.
 ```bash
 ./qle_adm.sh sync --system --restart
 ```
+
+---
+
+## After a WUI iSCSI save
+
+The WUI rewrites scst.conf and wipes the FC target block. Rebuild it:
+
+```bash
+./qle_adm.sh sync
+```
+
+This rebuilds scst.conf from config.json. Live sysfs state and active
+sessions are not touched.
+
+---
+
+## What survives what
+
+| Location | Reboot | BE change | Upgrade |
+|---|---|---|---|
+| `/mnt/<pool>/` | ✓ | ✓ | ✓ |
+| TrueNAS middleware DB | ✓ | ✓ | ✓ |
+| `/etc/` | ✓ | ✗ wiped | ✗ wiped |
+| `/root/` | ✓ | ✗ wiped | ✗ wiped |
+| `/run/` | ✗ tmpfs | ✗ | ✗ |
+
+`config.json` lives on `/mnt` and survives everything. The POSTINIT boot
+entry lives in the TrueNAS middleware database and also survives all
+lifecycle events. The modprobe config in `/etc` is the only file that
+needs restoring after a BE change - `sync --system` handles this.
 
 ---
 
