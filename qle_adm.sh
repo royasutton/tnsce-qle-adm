@@ -7,16 +7,15 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.8
+# Version: 2.9
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.8"
+VERSION="2.9"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
-SYSTEMD_DROP="/etc/systemd/system/scst.service.d"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
 LOG="${QLE_ADM_HOME}/qle_adm.log"
 FLASH_TOOL="qlflash"   # override if tool has different name or path
@@ -147,6 +146,36 @@ except:
 "
 }
 
+cfg_set() {
+    # cfg_set <key> <value>  - set a scalar value in config.json
+    [[ $DRY_RUN -eq 1 ]] && { info "[DRY-RUN] config set $1 = $2"; return; }
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+keys = '$1'.split('.')
+obj = d
+for k in keys[:-1]:
+    obj = obj.setdefault(k, {})
+obj[keys[-1]] = '$2'
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+}
+
+cfg_del() {
+    # cfg_del <key> - remove a key from config.json
+    [[ $DRY_RUN -eq 1 ]] && { info "[DRY-RUN] config del $1"; return; }
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+keys = '$1'.split('.')
+obj = d
+for k in keys[:-1]:
+    obj = obj.get(k, {})
+obj.pop(keys[-1], None)
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+}
+
 cfg_init() {
     [[ -f "$CONFIG" ]] && return
     py_json "
@@ -166,7 +195,8 @@ d = {
     },
     'isp_active_profile': {},
     'wwn_names': {},
-    'firmware': {}
+    'firmware': {},
+    'initscript_id': None
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print('Config initialized.')
@@ -866,7 +896,100 @@ load_target_module() {
     fi
 }
 
-# ─── Commands ─────────────────────────────────────────────────────────────────
+# ─── TrueNAS init script helpers ──────────────────────────────────────────────
+INITSCRIPT_COMMENT="qle_adm FC target boot setup"
+INITSCRIPT_TIMEOUT=60
+
+# Find an existing initshutdownscript entry by comment match.
+# Prints the id, or nothing if not found.
+initscript_find_id() {
+    midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+import json, sys
+entries = json.load(sys.stdin)
+for e in entries:
+    if e.get('comment','') == '${INITSCRIPT_COMMENT}':
+        print(e['id'])
+        break
+" 2>/dev/null || true
+}
+
+# Create or update the POSTINIT entry. Prints the id on success.
+initscript_install() {
+    local cmd="${QLE_ADM_HOME}/qle_adm.sh sync --boot --system"
+    local existing_id; existing_id=$(initscript_find_id)
+
+    if [[ -n "$existing_id" ]]; then
+        info "Updating existing initshutdownscript entry (id=${existing_id})"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            midclt call initshutdownscript.update "${existing_id}" \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT}\"}" \
+                2>/dev/null
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} ..."
+        fi
+        echo "$existing_id"
+    else
+        info "Creating initshutdownscript POSTINIT entry"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local result
+            result=$(midclt call initshutdownscript.create \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT}\"}" \
+                2>/dev/null)
+            python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$result" 2>/dev/null || true
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.create ..."
+        fi
+    fi
+}
+
+# Delete the POSTINIT entry. Tries stored id first, falls back to comment search.
+initscript_remove() {
+    local stored_id; stored_id=$(cfg_get 'initscript_id' '')
+    local id="${stored_id}"
+    [[ -z "$id" ]] && id=$(initscript_find_id)
+
+    if [[ -z "$id" ]]; then
+        warn "No initshutdownscript entry found to remove (already deleted or never installed)"
+        return
+    fi
+
+    if [[ $DRY_RUN -eq 0 ]]; then
+        midclt call initshutdownscript.delete "$id" 2>/dev/null && \
+            ok "Removed initshutdownscript entry (id=${id})" || \
+            warn "Failed to remove initshutdownscript entry (id=${id}) - remove manually in WUI"
+    else
+        info "[DRY-RUN] midclt call initshutdownscript.delete ${id}"
+    fi
+}
+
+# Check and report the POSTINIT entry state for cmd_status.
+# Prints ok/gap messages and returns 1 if gap found.
+initscript_status() {
+    local stored_id; stored_id=$(cfg_get 'initscript_id' '')
+    local found_id; found_id=$(initscript_find_id)
+
+    if [[ -n "$found_id" ]]; then
+        local enabled
+        enabled=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+import json,sys
+for e in json.load(sys.stdin):
+    if str(e.get('id','')) == '${found_id}':
+        print(e.get('enabled', False))
+        break
+" 2>/dev/null || echo "unknown")
+        if [[ "$enabled" == "True" ]]; then
+            ok "POSTINIT boot entry registered (id=${found_id}, enabled)"
+        else
+            gap "POSTINIT boot entry registered (id=${found_id}) but DISABLED - enable in WUI"
+            return 1
+        fi
+    else
+        gap "POSTINIT boot entry missing - run 'qle_adm.sh install'"
+        return 1
+    fi
+}
+
+
 
 cmd_install() {
     hdr "Installing qle_adm.sh v${VERSION}"
@@ -899,22 +1022,13 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
-    # boot service - calls sync --boot --system which rebuilds scst.conf,
-    # restores /etc files, and loads the module. SCST then starts and reads
-    # the reconstructed scst.conf naturally.
-    file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
-Description=qle_adm FC Target Boot Setup
-Before=scst.service
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot --system
-
-[Install]
-WantedBy=multi-user.target"
+    # TrueNAS POSTINIT boot entry - survives BE changes and upgrades
+    # because it lives in the TrueNAS middleware database, not in /etc.
+    local script_id; script_id=$(initscript_install)
+    if [[ -n "$script_id" && $DRY_RUN -eq 0 ]]; then
+        cfg_set 'initscript_id' "$script_id"
+        ok "POSTINIT boot entry registered (id=${script_id}) - visible in System > Advanced > Init/Shutdown Scripts"
+    fi
 
     # Install self
     local src_real dst_real
@@ -928,17 +1042,10 @@ WantedBy=multi-user.target"
     fi
 
     if [[ $DRY_RUN -eq 1 ]]; then
-        info "[DRY-RUN] systemctl daemon-reload && systemctl enable qle_adm-boot.service"
+        ok "Installation complete (dry run)"
     else
-        confirm "Enable qle_adm-boot.service at boot?" && {
-            systemctl daemon-reload
-            systemctl enable qle_adm-boot.service
-            ok "Enabled: qle_adm-boot.service"
-            log "systemctl enable qle_adm-boot.service"
-        }
+        ok "Installation complete"
     fi
-
-    ok "Installation complete"
     info "Invoke as: ${QLE_ADM_HOME}/qle_adm.sh <command>"
     info "Run 'qle_adm.sh status' to check state"
     info "Run 'qle_adm.sh list-extents' to see available devices"
@@ -954,14 +1061,8 @@ cmd_uninstall() {
     cmd_teardown
 
     rm_f_v "$MODPROBE_CONF"
-    rm_f_v "${SYSTEMD_DROP}/qle_adm-preload.conf"
-    rm_f_v "/etc/systemd/system/qle_adm-boot.service"
-
-    if [[ $DRY_RUN -eq 0 ]]; then
-        confirm "Run systemctl daemon-reload?" && systemctl daemon-reload && ok "daemon-reload complete"
-    else
-        info "[DRY-RUN] systemctl daemon-reload"
-    fi
+    initscript_remove
+    cfg_del 'initscript_id'
 
     ok "Uninstall complete. Config preserved at ${QLE_ADM_HOME}"
     info "To fully remove: rm -rf ${QLE_ADM_HOME}"
@@ -1113,27 +1214,8 @@ cmd_sync() {
         else
             ok "modprobe config present"
         fi
-
-        # Restore boot service if missing (after BE change or upgrade)
-        if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
-            warn "qle_adm-boot.service missing - restoring"
-            file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
-Description=qle_adm FC Target Boot Setup
-Before=scst.service
-After=local-fs.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-Environment=QLE_ADM_HOME=${QLE_ADM_HOME}
-ExecStart=${QLE_ADM_HOME}/qle_adm.sh sync --boot --system
-
-[Install]
-WantedBy=multi-user.target"
-            [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload && systemctl enable qle_adm-boot.service
-        else
-            ok "qle_adm-boot.service present"
-        fi
+        # The POSTINIT boot entry lives in the TrueNAS middleware DB and
+        # survives BE changes - no restoration needed here.
     else
         info "Skipping system file management (use --system to write /etc files)"
     fi
@@ -1402,10 +1484,9 @@ cmd_status() {
         gaps=$((gaps + 1))
     fi
 
-    if [[ -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
-        ok "qle_adm-boot.service installed"
+    if initscript_status; then
+        true
     else
-        gap "qle_adm-boot.service missing - run 'qle_adm.sh install'"
         gaps=$((gaps + 1))
     fi
 
