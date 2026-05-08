@@ -97,8 +97,8 @@ chmod +x ./qle_adm.sh
 # 6. List FC ports and note the index [N] of the port to use
 ./qle_adm.sh list-ports
 
-# 7. Enable the target port
-./qle_adm.sh port enable --port 0
+# 7. Enable the target port (use the index of the P2P port from step 6)
+./qle_adm.sh port enable --port 1
 
 # 8. Open the extent to all initiators
 ./qle_adm.sh open --ext 0
@@ -120,11 +120,12 @@ ready to make this configuration persistent across reboots, see
 # 1. Extract the archive and install to a persistent dataset
 QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 
-# 2. Verify the HBA is detected
+# 2. Verify the HBA is detected and identify the P2P port index
 ./qle_adm.sh hba-info
+./qle_adm.sh list-ports
 
-# 3. Enable a port as an FC target (writes to sysfs + config.json)
-./qle_adm.sh port enable --port 0
+# 3. Enable the P2P target port (use index from list-ports)
+./qle_adm.sh port enable --port 1
 
 # 4a. Expose a ZFS volume to all initiators
 ./qle_adm.sh open --ext 0
@@ -137,9 +138,9 @@ QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 ```
 
 From this point the configuration is persistent. On every boot,
-`qle_adm-boot.service` runs `sync --boot` before SCST starts, which
-rebuilds scst.conf from config.json and loads the module. SCST then
-reads the reconstructed scst.conf naturally.
+`qle_adm-boot.service` runs `sync --boot --system` before SCST starts, which
+restores /etc files, rebuilds scst.conf from config.json, and loads the module.
+SCST then reads the reconstructed scst.conf naturally.
 
 ---
 

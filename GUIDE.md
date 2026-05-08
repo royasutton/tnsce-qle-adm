@@ -455,7 +455,7 @@ on this driver build; `fw show` reports it as "not exposed by driver".
 ## ISP Parameter Profiles
 
 Each ISP type has a set of named parameter profiles stored in `config.json`.
-One profile is marked active (`*`) and used by `sync --boot`. Multiple
+One profile is marked active (`*`) and used by `sync --boot --system`. Multiple
 profiles allow switching between configurations without editing the config.
 
 ```bash
@@ -470,7 +470,7 @@ profiles allow switching between configurations without editing the config.
 #     Applied    : default
 ```
 
-**Configured:** the active profile that will be loaded on next `sync --boot`.
+**Configured:** the active profile that will be loaded on next `sync --boot --system`.
 **Applied:** the params actually running in the kernel right now.
 **drift:** applied and configured differ; reload the module to resync.
 
