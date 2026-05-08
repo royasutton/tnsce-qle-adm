@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.6
+# Version: 2.7
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.6"
+VERSION="2.7"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1716,7 +1716,7 @@ cmd_port_enable() {
         scst_enable_target "$wwn" "$idx"
         ok "Port ${wwn} enabled"
     else
-        warn "SCST target path not found - will apply on next 'qle_adm.sh apply'"
+        warn "SCST target not yet live - port saved to config. Run 'sync --restart' to activate now, or it will take effect at next boot."
     fi
 }
 
@@ -2763,6 +2763,18 @@ main() {
         err "  QLE_ADM_HOME=. ./qle_adm.sh ${cmd}   (uninstalled, current directory)"
         exit 1
     fi
+
+    # Verify the script is actually present at QLE_ADM_HOME for commands
+    # that require a functioning install (skip for self-contained commands)
+    case "$cmd" in
+        install|version|help|examples) ;;
+        *)
+            if [[ -n "${QLE_ADM_HOME}" && ! -f "${QLE_ADM_HOME}/qle_adm.sh" ]]; then
+                warn "QLE_ADM_HOME is set to '${QLE_ADM_HOME}' but qle_adm.sh was not found there."
+                warn "Re-run install or correct QLE_ADM_HOME."
+            fi
+            ;;
+    esac
 
     case "$cmd" in
         install)         cmd_install ;;
