@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.5
+# Version: 2.6
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.5"
+VERSION="2.6"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -880,14 +880,9 @@ cmd_install() {
         err "  QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install"
         return 1
     fi
-    if [[ "${QLE_ADM_HOME}" == /root* ]]; then
-        warn "QLE_ADM_HOME is ${QLE_ADM_HOME}"
-        warn "/root is wiped on boot environment changes - use /mnt/<pool>/... instead"
-        confirm_or_abort "Continue installing to /root anyway?"
-    fi
-    if [[ "${QLE_ADM_HOME}" != /mnt/* && "${QLE_ADM_HOME}" != /root* ]]; then
-        warn "QLE_ADM_HOME (${QLE_ADM_HOME}) is not under /mnt - may not survive BE changes"
-        confirm_or_abort "Continue anyway?"
+    if [[ "${QLE_ADM_HOME}" != /mnt/* ]]; then
+        warn "QLE_ADM_HOME (${QLE_ADM_HOME}) is not under /mnt - this is a non-persistent store and will not survive boot environment changes"
+        confirm_or_abort "Continue installing to a non-persistent location anyway?"
     fi
 
     mkdir_v "${QLE_ADM_HOME}"
@@ -1359,11 +1354,13 @@ cmd_status() {
 
     # QLE_ADM_HOME display
     echo -e "\n${CYN}Home:${NC}"
-    if [[ -n "${QLE_ADM_HOME}" ]]; then
-        echo -e "  QLE_ADM_HOME = ${WHT}${QLE_ADM_HOME}${NC}"
-    else
+    if [[ -z "${QLE_ADM_HOME}" ]]; then
         echo -e "  QLE_ADM_HOME = ${YLW}(not set)${NC}"
         warn "QLE_ADM_HOME is not set - persistent state will not survive reboots"
+    elif [[ "${QLE_ADM_HOME}" == /mnt/* ]]; then
+        echo -e "  QLE_ADM_HOME = ${WHT}${QLE_ADM_HOME}${NC}"
+    else
+        echo -e "  QLE_ADM_HOME = ${WHT}${QLE_ADM_HOME}${NC}  ${RED}(non-persistent store)${NC}"
     fi
 
     local gaps=0
