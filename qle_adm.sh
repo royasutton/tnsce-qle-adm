@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.7
+# Version: 2.8
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.7"
+VERSION="2.8"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1728,7 +1728,12 @@ cmd_port_disable() {
     warn "Disabling port ${wwn}"
     cfg_list_remove "enabled_ports" "$wwn"
     local tgt_path; tgt_path=$(scst_target_path "$wwn")
-    [[ -d "$tgt_path" ]] && sysfs_write_if_changed "${tgt_path}/enabled" "0" && ok "Port ${wwn} disabled"
+    if [[ -d "$tgt_path" ]]; then
+        sysfs_write_if_changed "${tgt_path}/enabled" "0"
+        ok "Port ${wwn} disabled"
+    else
+        warn "SCST target not yet live - port removed from config. Run 'sync --restart' to deactivate now, or it will take effect at next boot."
+    fi
 }
 
 cmd_open() {
