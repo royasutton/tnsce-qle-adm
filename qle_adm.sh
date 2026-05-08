@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.4
+# Version: 2.5
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.4"
+VERSION="2.5"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -2453,9 +2453,9 @@ Config       : isp-params  list | set | use | del
 
 WWN Names    : name  list | set | get | del
 
-Global       : --dry-run  --yes  --verbose  --home <path>
+Global       : examples  help  version
                --port N   --init N   --ext N
-               help  examples  version
+               --dry-run  --yes  --verbose  --home <path>
 USAGE_EOF
 )"
     printf "%b\n" "${DIM}Config: ${QLE_ADM_HOME}/config.json  |  Log: ${LOG}${NC}"
@@ -2548,6 +2548,11 @@ ${CYN}WWN Names:${NC}
   name get <wwn>                 Show name entry for a WWN
   name del <wwn>                 Remove name entry
 
+${CYN}Subcommands:${NC}
+  examples                       Common workflow examples
+  help                           This detailed help
+  version                        Print version string and exit
+
 ${CYN}Global Options:${NC}
   --dry-run                      Print actions without executing any writes
   --yes                          Skip all interactive confirmations
@@ -2559,11 +2564,6 @@ ${CYN}Index Selection:${NC}
   --init N     Initiator by index from list-initiators (active or seen)
   --ext N      Extent by index from list-extents
   Mixing a positional WWN/name with --port/--init/--ext is an error.
-
-${CYN}Subcommands:${NC}
-  version                        Print version string and exit
-  help                           This detailed help
-  examples                       Common workflow examples
 
 ${DIM}Config: ${QLE_ADM_HOME}/config.json
 Log:    ${LOG}
@@ -2589,6 +2589,7 @@ cmd_examples() {
 
   # Verify state after install
   ./qle_adm.sh status
+
 EX
 
     hdr "Sync config.json to scst.conf"
@@ -2605,6 +2606,7 @@ EX
 
   # After a BE change or upgrade - restore /etc files AND restart SCST:
   ./qle_adm.sh sync --system --restart
+
 EX
 
     hdr "Module management"
@@ -2622,6 +2624,7 @@ EX
 
   # Revert to initiator mode
   ./qle_adm.sh module unload
+
 EX
 
     hdr "Bring up a target port and map a LUN"
@@ -2638,6 +2641,7 @@ EX
 
   # Or assign to a specific initiator only
   ./qle_adm.sh assign --ext 0 --init 0
+
 EX
 
     hdr "Name your ports and initiators"
@@ -2654,6 +2658,7 @@ EX
   # Verify
   ./qle_adm.sh name list
   ./qle_adm.sh list-initiators
+
 EX
 
     hdr "Firmware management"
@@ -2671,6 +2676,7 @@ EX
 
   # Flash stored firmware to card (requires qlflash)
   ./qle_adm.sh fw flash --slot primary --yes
+
 EX
 
     hdr "ISP parameter profiles"
@@ -2686,6 +2692,7 @@ EX
   # Switch active profile then reload module to apply
   ./qle_adm.sh isp-params use ISP2532 --profile optrom
   ./qle_adm.sh module reload
+
 EX
 
     hdr "Monitoring"
@@ -2699,6 +2706,7 @@ EX
 
   # Full status with gap analysis
   ./qle_adm.sh status
+
 EX
 
     hdr "Dry-run any operation"
@@ -2707,6 +2715,7 @@ EX
   ./qle_adm.sh --dry-run sync
   ./qle_adm.sh --dry-run fw save
   ./qle_adm.sh --dry-run assign --ext 0 --init 0
+
 EX
     _divider_force
 }
