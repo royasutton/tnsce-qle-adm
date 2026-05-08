@@ -46,7 +46,7 @@ TrueNAS SCALE CE
 are derived from it:
 
 **`/etc/scst.conf` FC target block** is rebuilt from config.json by `sync`.
-SCST reads this file at startup to initialize all FC target state — enabled
+SCST reads this file at startup to initialize all FC target state - enabled
 ports, rel_tgt_ids, LUN mappings, and initiator groups. No sysfs writes are
 performed at boot; SCST initializes everything from its own config file.
 
@@ -56,7 +56,7 @@ both sysfs and config.json atomically. There is no separate save step.
 
 ### Why scst.conf for boot, sysfs for runtime
 
-SCST reads `/etc/scst.conf` once at startup. It has no reload mechanism —
+SCST reads `/etc/scst.conf` once at startup. It has no reload mechanism -
 there is no `SIGHUP` or `systemctl reload`. Runtime changes must go through
 sysfs. The split architecture uses each path for what it does best: scst.conf
 for clean initialization at startup, sysfs for zero-disruption runtime changes.
@@ -79,15 +79,20 @@ alongside the target stack, which causes the ISP2532 to properly assert the
 port signal and complete P2P negotiation. This is required for direct cable
 (switchless) ISP2532 target operation.
 
-### Why ISP2432 is not supported as a target
+### ISP2432 target mode - current status unknown
 
-The `qla2xxx_scst` driver's target mode initialization is incompatible with
-ISP2432 (QLE2462, QLE2460) on Linux kernel 6.12. The card produces AEN
-`0x8017 a964` continuously and `fw_state` returns all-F values — firmware
-completely unresponsive in target mode. This occurs with all firmware versions
-tested and is a driver/kernel compatibility issue. ISP2432 works correctly as
-a plain initiator using `qla2xxx`. Use ISP2532 (QLE2562, HP AJ764A) or newer
-for target mode.
+ISP2432 (QLE2462, QLE2460) hardware supports FC target mode in principle.
+However target mode initialization has not been successfully achieved on Linux
+kernel 6.12 with `qla2xxx_scst`. The card produces AEN `0x8017 a964`
+continuously and `fw_state` returns all-F values - firmware unresponsive in
+target mode. This has been observed across all firmware versions tested and
+with multiple module parameter combinations. The root cause has not been
+determined - it may be a driver/kernel interaction or a parameter combination
+not yet found. Further debugging may resolve it.
+
+ISP2432 works correctly as a plain initiator using the `qla2xxx` module. If
+you are investigating ISP2432 target mode, use `isp-params set` and
+`module reload` to try parameter combinations without rebooting.
 
 ### Why ql2xfwloadbin=0 (primary flash)
 
@@ -205,7 +210,7 @@ or by full path `/mnt/<pool>/admin/qle_adm/qle_adm.sh <command>`.
 
 | Command | Description |
 |---|---|
-| `sync [--boot] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` loads the module; used by the boot service. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms — all active sessions dropped). `--system` also writes/restores /etc files (modprobe config and boot service); implied by `--boot`. Without any flag, scst.conf only — always safe. |
+| `sync [--boot] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` loads the module; used by the boot service. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also writes/restores /etc files (modprobe config and boot service); implied by `--boot`. Without any flag, scst.conf only - always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -247,13 +252,13 @@ authoritative source for param drift detection.
 ./qle_adm.sh module reload
 ```
 
-**Retired commands** — these print an informative error and exit:
+**Retired commands** - these print an informative error and exit:
 
 | Command | Replacement |
 |---|---|
 | `setup [--boot]` | `sync [--boot]` |
-| `apply` | Not needed — all changes write atomically to config.json + sysfs |
-| `save` | Not needed — seen_initiators captured automatically by `status` and `list-initiators` |
+| `apply` | Not needed - all changes write atomically to config.json + sysfs |
+| `save` | Not needed - seen_initiators captured automatically by `status` and `list-initiators` |
 | `repair` | `sync` |
 
 ### Status
@@ -519,7 +524,7 @@ Common causes and fixes:
 |---|---|
 | `8017 d17f` | No optical signal (SFP or cable issue) |
 | `8017 4034` | Loop arbitration timeout (topology mismatch) |
-| `8017 a964` | Target mode firmware init failure (ISP2432 on kernel 6.12) |
+| `8017 a964` | Target mode firmware init failure (ISP2432 on kernel 6.12 - root cause unknown) |
 | `8017 a284` | FLOGI timeout (target transmitting, initiator not responding) |
 
 ### scst.conf FC block missing after WUI save
@@ -529,7 +534,20 @@ Common causes and fixes:
 ```
 
 This rebuilds the block from config.json without touching active sessions.
-No SCST restart needed — the WUI does not restart SCST on iSCSI saves.
+No SCST restart needed - the WUI does not restart SCST on iSCSI saves.
+
+### scst.conf does not exist
+
+`/etc/scst.conf` is owned by TrueNAS SCST. `qle_adm.sh` never creates it -
+it only modifies an existing file. If the file is missing, SCST has either
+never been started or its installation is incomplete.
+
+```bash
+systemctl is-active scst
+systemctl start scst
+# Once scst.conf exists, sync can write the FC target block:
+./qle_adm.sh sync
+```
 
 ### Targets not active after upgrade or BE change
 
@@ -585,12 +603,16 @@ cat /sys/kernel/scst_tgt/targets/qla2x00t/*/rel_tgt_id 2>/dev/null
 
 ## FAQ
 
-**Q: Why can't I use my ISP2432 (QLE2462/QLE2460) as an FC target?**
+**Q: Can I use my ISP2432 (QLE2462/QLE2460) as an FC target?**
 
-The `qla2xxx_scst` driver's target mode initialization is incompatible with
-ISP2432 on Linux kernel 6.12. It is not fixable via firmware or module
-parameters. ISP2432 works correctly as an initiator using the plain `qla2xxx`
-driver. Use ISP2532 or newer for target mode.
+The hardware supports target mode in principle, but target mode initialization
+has not been successfully achieved on Linux kernel 6.12 with `qla2xxx_scst`.
+The card produces AEN `0x8017 a964` continuously with all firmware versions
+and parameter combinations tested so far. The root cause is not yet determined
+and further debugging may find a working configuration. ISP2432 works correctly
+as an initiator using the plain `qla2xxx` driver. If you are investigating
+ISP2432 target mode, `isp-params set` and `module reload` allow parameter
+changes without rebooting - watch `dmesg` for AEN codes.
 
 ---
 
@@ -628,7 +650,7 @@ to extract the optrom to the firmware store, then set `ql2xfwloadbin=2`.
 
 SCST reads `/etc/scst.conf` at startup and initializes all target state from
 it. Reconstructing the full `TARGET_DRIVER qla2x00t {}` block from config.json
-before SCST starts means SCST itself handles the initialization — no sysfs
+before SCST starts means SCST itself handles the initialization - no sysfs
 apply sequence is needed at boot, no race condition between SCST initialization
 and sysfs writes, and no brief window where a target port is enabled but LUNs
 are not yet mapped. Runtime changes continue through sysfs for zero disruption
@@ -647,7 +669,7 @@ only needed in specific situations:
 - When SCST needs to re-read the updated scst.conf: `sync --restart`
 - After an upgrade or BE change and SCST needs restarting: `sync --system --restart`
 
-Running `sync` at any other time is harmless — it rebuilds scst.conf from
+Running `sync` at any other time is harmless - it rebuilds scst.conf from
 config.json without touching sysfs or restarting anything.
 
 ---
@@ -758,7 +780,7 @@ but SCST does not re-read it until the next restart.
 
 ## Known Limitations
 
-- **ISP2432 target mode:** not supported on kernel 6.12. Use ISP2532 or newer.
+- **ISP2432 target mode:** not achieved on kernel 6.12 - root cause unknown. Card produces AEN `0x8017 a964` with all firmware and parameter combinations tested. May be resolvable with further debugging. Works correctly as an initiator.
 - **Primary flash version:** not readable via sysfs on this driver build. `fw show` reports it as "not exposed by driver".
 - **Sysfs NVRAM writes:** writes to the `nvram` sysfs file update the driver shadow buffer only. Physical EEPROM is not written.
 - **FC root + deep sleep:** incompatible. Use s2idle or disable suspend.

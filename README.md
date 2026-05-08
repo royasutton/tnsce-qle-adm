@@ -10,12 +10,12 @@ environment changes.
 ## What it does
 
 TrueNAS SCALE CE includes SCST and the `qla2xxx_scst` kernel module,
-but the web UI only manages iSCSI — there is no FC target configuration
+but the web UI only manages iSCSI - there is no FC target configuration
 in the WUI. `qle_adm.sh` fills that gap:
 
 - Loads `qla2xxx_scst` with the correct parameters for target mode
 - Reconstructs the full FC target configuration in `/etc/scst.conf` at
-  boot from `config.json` — SCST reads it naturally at startup
+  boot from `config.json` - SCST reads it naturally at startup
 - Maps ZFS volumes (extents) to initiators as FC LUNs via sysfs at runtime
 - Persists all configuration in `config.json` across reboots and TrueNAS
   upgrades
@@ -28,11 +28,11 @@ in the WUI. `qle_adm.sh` fills that gap:
 `config.json` on `/mnt` is the single source of truth and survives all
 TrueNAS lifecycle events. Two representations are derived from it:
 
-**`/etc/scst.conf`** — rebuilt at boot and on `sync`. SCST reads this file
+**`/etc/scst.conf`** - rebuilt at boot and on `sync`. SCST reads this file
 at startup to initialize all FC target state: enabled ports, rel_tgt_ids,
 LUN mappings, and initiator groups. No sysfs writes are needed at boot.
 
-**Live sysfs** — all runtime changes (port enable/disable, open, close,
+**Live sysfs** - all runtime changes (port enable/disable, open, close,
 assign, unassign) write directly to both sysfs and `config.json` atomically.
 Active sessions are never disrupted by configuration changes to other targets.
 
@@ -45,8 +45,10 @@ without touching live sysfs state or active sessions.
 ## What you need
 
 - **TrueNAS SCALE CE** (tested on 25.10.x, kernel 6.12)
-- **QLogic ISP2532 or newer HBA** (ISP2432 cannot be used as an FC target
-  on kernel 6.12 and is not supported in target mode)
+- **QLogic ISP2532 or newer HBA** for confirmed target mode support. ISP2432
+  target mode has not been achieved on kernel 6.12 - root cause unknown,
+  further debugging may find a working configuration. ISP2432 works as an
+  initiator.
 - **SCST running**: verify with `systemctl is-active scst`
 - **A ZFS zvol** registered as an SCST block device in `/etc/scst.conf`
 - **A dataset under `/mnt`** for persistent storage of the script and config
@@ -60,10 +62,10 @@ without touching live sysfs state or active sessions.
 ## Quick Start
 
 Expose an existing ZFS extent to FC initiators without installing
-`qle_adm.sh`. SCST must already be active — verify under System >
+`qle_adm.sh`. SCST must already be active - verify under System >
 Services in the TrueNAS WUI.
 
-Set `QLE_ADM_HOME` once for the session — all commands below use it:
+Set `QLE_ADM_HOME` once for the session - all commands below use it:
 
 ```bash
 export QLE_ADM_HOME=.
@@ -82,7 +84,7 @@ chmod +x ./qle_adm.sh
 ./qle_adm.sh module load
 
 # 3. Inject FC target block into scst.conf and restart SCST to read it.
-#    Warns and confirms before restarting — this is the only change
+#    Warns and confirms before restarting - this is the only change
 #    made to /etc on this path.
 ./qle_adm.sh sync --restart
 
@@ -196,7 +198,7 @@ restarts SCST so it reads the updated scst.conf in one step.
 ./qle_adm.sh list-initiators
 ```
 
-**After upgrade — targets not active:**
+**After upgrade - targets not active:**
 ```bash
 ./qle_adm.sh sync --system --restart
 ```

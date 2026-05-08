@@ -359,7 +359,7 @@ sysfs_write_if_changed() {
     local current
     current=$(cat "$path" 2>/dev/null | tr -d '[:space:]' || echo "")
     if [[ "$current" == "$val" ]]; then
-        [[ $VERBOSE -eq 1 ]] && info "sysfs: $path already $val — skipping"
+        [[ $VERBOSE -eq 1 ]] && info "sysfs: $path already $val - skipping"
         return 0
     fi
     echo "$val" > "$path" 2>/dev/null || { err "Failed to write '$val' to $path (current: $current)"; return 1; }
@@ -377,7 +377,7 @@ hex_to_dec() {
 }
 
 # ─── WWN index resolution ─────────────────────────────────────────────────────
-# Ports are indexed by sorted WWN order — stable across reboots (tied to HW)
+# Ports are indexed by sorted WWN order - stable across reboots (tied to HW)
 # Initiators are indexed from currently active sessions
 # Extents are indexed by sorted name from scst.conf
 
@@ -536,7 +536,7 @@ get_isp_type_dominant() {
     all_types=$(detect_hbas | awk '{print $4}' | grep -v UNKNOWN | sort | uniq -c | sort -rn)
 
     if [[ -z "$all_types" ]]; then
-        warn "Could not determine ISP type from detected HBAs — defaulting to ISP2532"
+        warn "Could not determine ISP type from detected HBAs - defaulting to ISP2532"
         echo "ISP2532"
         return
     fi
@@ -545,7 +545,7 @@ get_isp_type_dominant() {
     distinct=$(echo "$all_types" | wc -l | tr -d ' ')
     if [[ "$distinct" -gt 1 ]]; then
         warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')"
-        warn "Module params will use the most common type — verify with 'module status'"
+        warn "Module params will use the most common type - verify with 'module status'"
     fi
 
     echo "$all_types" | awk '{print $2}' | head -1
@@ -592,7 +592,7 @@ get_applied_params() {
 # For remote ports: look up stored port index in wwn_names config.
 wwn_port_index() {
     local wwn="$1"
-    # Check sysfs for local HBA port — find fc_host whose port_name matches
+    # Check sysfs for local HBA port - find fc_host whose port_name matches
     for h in /sys/class/fc_host/host*; do
         local pname; pname=$(cat "${h}/port_name" 2>/dev/null | sed 's/0x//' | \
             sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6:\7:\8/')
@@ -843,11 +843,11 @@ cmd_install() {
     fi
     if [[ "${QLE_ADM_HOME}" == /root* ]]; then
         warn "QLE_ADM_HOME is ${QLE_ADM_HOME}"
-        warn "/root is wiped on boot environment changes — use /mnt/<pool>/... instead"
+        warn "/root is wiped on boot environment changes - use /mnt/<pool>/... instead"
         confirm_or_abort "Continue installing to /root anyway?"
     fi
     if [[ "${QLE_ADM_HOME}" != /mnt/* && "${QLE_ADM_HOME}" != /root* ]]; then
-        warn "QLE_ADM_HOME (${QLE_ADM_HOME}) is not under /mnt — may not survive BE changes"
+        warn "QLE_ADM_HOME (${QLE_ADM_HOME}) is not under /mnt - may not survive BE changes"
         confirm_or_abort "Continue anyway?"
     fi
 
@@ -865,7 +865,7 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
-    # boot service — calls sync --boot --system which rebuilds scst.conf,
+    # boot service - calls sync --boot --system which rebuilds scst.conf,
     # restores /etc files, and loads the module. SCST then starts and reads
     # the reconstructed scst.conf naturally.
     file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
@@ -938,10 +938,15 @@ cmd_uninstall() {
 #
 # Called by sync --boot (before SCST starts on every boot) and by sync
 # (at runtime after a WUI iSCSI save wiped the block). SCST reads the file
-# naturally at startup — no sysfs apply step is needed or performed at boot.
+# naturally at startup - no sysfs apply step is needed or performed at boot.
 render_scst_conf() {
     local conf="/etc/scst.conf"
-    [[ -f "$conf" ]] || { warn "scst.conf not found — skipping FC target block render"; return 0; }
+    if [[ ! -f "$conf" ]]; then
+        err "/etc/scst.conf not found - SCST must be installed and started at least"
+        err "once before qle_adm can write the FC target block."
+        err "Verify SCST is active: systemctl is-active scst"
+        return 1
+    fi
 
     local block
     block=$(py_json "
@@ -968,7 +973,7 @@ for port_idx, wwn in enumerate(enabled_ports):
     lines.append(f'        rel_tgt_id {rel_tgt_id}')
     lines.append('')
 
-    # Open extents: no GROUP wrapper — visible to all initiators
+    # Open extents: no GROUP wrapper - visible to all initiators
     for lun_idx, ext in enumerate(open_extents):
         lines.append(f'        LUN {lun_idx} {ext}')
 
@@ -998,7 +1003,7 @@ print('\n'.join(lines))
 ")
 
     if [[ -z "$block" ]]; then
-        err "render_scst_conf: config.json produced empty block — aborting"
+        err "render_scst_conf: config.json produced empty block - aborting"
         return 1
     fi
 
@@ -1060,7 +1065,7 @@ cmd_sync() {
     if [[ $system_mode -eq 1 ]]; then
         # Restore modprobe config if missing (after BE change or upgrade)
         if [[ ! -f "$MODPROBE_CONF" ]]; then
-            warn "modprobe config missing — restoring"
+            warn "modprobe config missing - restoring"
             local params; params=$(get_module_params "$isp_type")
             file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
         else
@@ -1069,7 +1074,7 @@ cmd_sync() {
 
         # Restore boot service if missing (after BE change or upgrade)
         if [[ ! -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
-            warn "qle_adm-boot.service missing — restoring"
+            warn "qle_adm-boot.service missing - restoring"
             file_write "/etc/systemd/system/qle_adm-boot.service" "[Unit]
 Description=qle_adm FC Target Boot Setup
 Before=scst.service
@@ -1092,22 +1097,22 @@ WantedBy=multi-user.target"
     fi
 
     # Rebuild scst.conf FC target block from config.json
-    render_scst_conf
+    render_scst_conf || return 1
 
     if [[ $boot_mode -eq 1 ]]; then
         # Load the target module. SCST starts after this service exits and
-        # reads the reconstructed scst.conf naturally — no sysfs apply needed.
+        # reads the reconstructed scst.conf naturally - no sysfs apply needed.
         if ! module_loaded "qla2xxx_scst"; then
             load_target_module "$isp_type"
             sleep 5
         else
             ok "qla2xxx_scst already loaded"
         fi
-        ok "Boot sync complete — SCST will initialize FC targets from scst.conf"
+        ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then
         # Restart the running SCST service so it re-reads the updated scst.conf.
-        # Warn clearly — all active iSCSI and FC sessions will be dropped.
+        # Warn clearly - all active iSCSI and FC sessions will be dropped.
         local sessions=0
         for sess_path in /sys/kernel/scst_tgt/targets/*/sessions/*/; do
             [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
@@ -1115,17 +1120,17 @@ WantedBy=multi-user.target"
         if [[ $sessions -gt 0 ]]; then
             warn "${sessions} active session(s) will be dropped by the SCST restart"
         fi
-        warn "sync --restart will restart scst.service — all active sessions will be disconnected"
+        warn "sync --restart will restart scst.service - all active sessions will be disconnected"
         confirm_or_abort "Restart scst.service now?"
         if [[ $DRY_RUN -eq 0 ]]; then
             systemctl restart scst
-            ok "scst.service restarted — FC targets initialized from scst.conf"
+            ok "scst.service restarted - FC targets initialized from scst.conf"
         else
             info "[DRY-RUN] systemctl restart scst"
         fi
 
     else
-        ok "Sync complete — scst.conf updated from config.json"
+        ok "Sync complete - scst.conf updated from config.json"
         info "Live sysfs state not touched. Use 'sync --restart' to restart SCST if required."
     fi
 }
@@ -1182,7 +1187,7 @@ cmd_module() {
 
     _module_unload() {
         if ! module_loaded "qla2xxx_scst"; then
-            warn "qla2xxx_scst not loaded — nothing to unload"
+            warn "qla2xxx_scst not loaded - nothing to unload"
             return 0
         fi
         local sessions=0
@@ -1258,7 +1263,7 @@ cmd_module() {
             local type_count; type_count=$(echo "$distinct_types" | grep -c . || true)
             if [[ "$type_count" -gt 1 ]]; then
                 warn "Multiple ISP types present: $(echo "$distinct_types" | tr '\n' ' ')"
-                warn "Module params apply globally — all ports share the same loaded module"
+                warn "Module params apply globally - all ports share the same loaded module"
             fi
             echo ""
             if module_loaded "qla2xxx_scst"; then
@@ -1273,10 +1278,10 @@ cmd_module() {
                 if [[ "$applied" == "$configured" ]]; then
                     echo -e "\n  $(ok "Params match configured")"
                 else
-                    echo -e "\n  $(warn "Params differ from configured — run 'module reload' to resync")"
+                    echo -e "\n  $(warn "Params differ from configured - run 'module reload' to resync")"
                 fi
             elif module_loaded "qla2xxx"; then
-                warn "qla2xxx loaded (initiator mode) — not target mode"
+                warn "qla2xxx loaded (initiator mode) - not target mode"
                 info "Run 'module load' to switch to target mode"
             else
                 err "No QLogic FC module loaded"
@@ -1299,14 +1304,14 @@ cmd_status() {
     echo -e "\n${CYN}Modules:${NC}"
     if [[ -d /sys/module/qla2xxx_scst ]]; then
         ok "qla2xxx_scst loaded (target mode)"
-        # Warn if multiple distinct ISP types are present — params are global
+        # Warn if multiple distinct ISP types are present - params are global
         local distinct_types
         distinct_types=$(detect_hbas | awk '{print $4}' | sort -u | grep -v UNKNOWN)
         local type_count; type_count=$(echo "$distinct_types" | grep -c . || true)
         [[ "$type_count" -gt 1 ]] && \
-            warn "Multiple ISP types detected: $(echo "$distinct_types" | tr '\n' ' ')— module params are global"
+            warn "Multiple ISP types detected: $(echo "$distinct_types" | tr '\n' ' ')- module params are global"
     elif [[ -d /sys/module/qla2xxx ]]; then
-        warn "qla2xxx loaded (initiator mode) — not target mode"
+        warn "qla2xxx loaded (initiator mode) - not target mode"
         gap "qla2xxx_scst not loaded"
         gaps=$((gaps + 1))
     else
@@ -1328,21 +1333,21 @@ cmd_status() {
     if [[ -f "$MODPROBE_CONF" ]]; then
         ok "modprobe config present: ${MODPROBE_CONF}"
     else
-        gap "modprobe config missing: ${MODPROBE_CONF} — run 'qle_adm.sh sync'"
+        gap "modprobe config missing: ${MODPROBE_CONF} - run 'qle_adm.sh sync'"
         gaps=$((gaps + 1))
     fi
 
     if [[ -f "/etc/systemd/system/qle_adm-boot.service" ]]; then
         ok "qle_adm-boot.service installed"
     else
-        gap "qle_adm-boot.service missing — run 'qle_adm.sh install'"
+        gap "qle_adm-boot.service missing - run 'qle_adm.sh install'"
         gaps=$((gaps + 1))
     fi
 
     if grep -q "TARGET_DRIVER qla2x00t" /etc/scst.conf 2>/dev/null; then
         ok "scst.conf contains TARGET_DRIVER qla2x00t block"
     else
-        gap "scst.conf missing TARGET_DRIVER qla2x00t block — run 'qle_adm.sh sync'"
+        gap "scst.conf missing TARGET_DRIVER qla2x00t block - run 'qle_adm.sh sync'"
         gaps=$((gaps + 1))
     fi
 
@@ -1353,7 +1358,7 @@ cmd_status() {
         applied=$(get_applied_params)
         configured=$(get_module_params "$isp_type")
         if [[ -n "$applied" && "$applied" != "$configured" ]]; then
-            gap "Module params drift — applied differs from configured (run 'setup' to resync)"            gaps=$((gaps + 1))
+            gap "Module params drift - applied differs from configured (run 'setup' to resync)"            gaps=$((gaps + 1))
         fi
     fi
 
@@ -1401,9 +1406,9 @@ cmd_status() {
 
     echo ""
     if [[ $gaps -eq 0 ]]; then
-        ok "No gaps detected — system fully operational"
+        ok "No gaps detected - system fully operational"
     else
-        warn "${gaps} gap(s) detected — run 'qle_adm.sh sync' to fix"
+        warn "${gaps} gap(s) detected - run 'qle_adm.sh sync' to fix"
     fi
 }
 
@@ -1448,7 +1453,7 @@ cmd_hba_info() {
             stored_ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown") || \
             stored_ver=""
 
-        echo -e "\n${WHT}[${idx}] ${host}${NC} — ${isp} @ ${pci}"
+        echo -e "\n${WHT}[${idx}] ${host}${NC} - ${isp} @ ${pci}"
         echo -e "  WWN        : ${CYN}${wwn}${NC}"
         echo -e "  Running FW : ${fw_ver}${fw_build:+ (build ${fw_build})}"
         echo -e "  Primary FW : ${primary_fw:-${DIM}not exposed by driver${NC}}"
@@ -1625,7 +1630,7 @@ cmd_port_enable() {
         scst_enable_target "$wwn" "$idx"
         ok "Port ${wwn} enabled"
     else
-        warn "SCST target path not found — will apply on next 'qle_adm.sh apply'"
+        warn "SCST target path not found - will apply on next 'qle_adm.sh apply'"
     fi
 }
 
@@ -1983,7 +1988,7 @@ cmd_stats() {
                 si=$((si + 1))
             done
         done
-        [[ $watch_mode -eq 1 ]] && echo -e "\n${DIM}Refreshing every ${WATCH_INTERVAL}s — Ctrl+C to stop${NC}"
+        [[ $watch_mode -eq 1 ]] && echo -e "\n${DIM}Refreshing every ${WATCH_INTERVAL}s - Ctrl+C to stop${NC}"
     }
 
     if [[ $wide_mode -eq 1 ]]; then
@@ -2055,7 +2060,7 @@ cmd_fw() {
                 # Release optrom
                 echo 0 > "$optrom_ctl" 2>/dev/null || true
                 local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-                [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty — driver may not support optrom extraction on this build"; rm -f "$dest"; return 1; }
+                [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty - driver may not support optrom extraction on this build"; rm -f "$dest"; return 1; }
                 local ver; ver=$(strings "$dest" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
                 ok "Saved ${isp_type} optrom firmware ${ver} ${SYM_INFO} ${dest}  (${sz} bytes)"
             else
@@ -2085,7 +2090,7 @@ cmd_fw() {
                     2) fwbin_label="filesystem" ;;
                     *) fwbin_label="unknown" ;;
                 esac
-                echo -e "\n  ${WHT}[${idx}] ${host}${NC} — ${isp}  ${wwn} (${CYN}${lbl}${NC})"
+                echo -e "\n  ${WHT}[${idx}] ${host}${NC} - ${isp}  ${wwn} (${CYN}${lbl}${NC})"
                 echo -e "    Running  : ${fw}"
                 echo -e "    Primary  : ${primary_ver}"
                 echo -e "    Optrom   : ${optrom_ver}"
@@ -2113,7 +2118,7 @@ cmd_fw() {
                 if [[ -n "$stored_ver" ]]; then
                     [[ "$stored_ver" == "$optrom_ver" ]] && sync_ind="${GRN}${SYM_OK}${NC}" || sync_ind="${YLW}${SYM_WARN}${NC}"
                 else
-                    sync_ind="${DIM}—${NC}"
+                    sync_ind="${DIM}-${NC}"
                 fi
                 echo -e "  ${sync_ind} ${host}  ${isp}  ${wwn} (${CYN}${lbl}${NC})  running=${fw}  optrom=${optrom_ver}  stored=${stored_ver:-none}"
             done
@@ -2134,7 +2139,7 @@ cmd_fw() {
 
             echo -e "\n${CYN}Preflight:${NC}"
 
-            # 1 — flash tool
+            # 1 - flash tool
             local flash_bin; flash_bin=$(command -v "$FLASH_TOOL" 2>/dev/null || echo "")
             if [[ -z "$flash_bin" ]]; then
                 err "Flash tool '${FLASH_TOOL}' not found in PATH"
@@ -2143,21 +2148,21 @@ cmd_fw() {
             fi
             ok "Flash tool: ${flash_bin}"
 
-            # 2 — detect port
+            # 2 - detect port
             read -r _ host _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
             ok "Target port: ${host} (${isp_type})"
 
-            # 3 — source file
+            # 3 - source file
             local fw_file="${ISP_FW_FILE[$isp_type]:-}"
             [[ -z "$fw_src" ]] && fw_src="${FIRMWARE_DIR}/${isp_type}/${fw_file}"
             [[ ! -f "$fw_src" ]] && { err "Firmware file not found: ${fw_src}  (run 'fw save' first or use --file)"; return 1; }
             ok "Source: ${fw_src}"
 
-            # 4 — firmware version
+            # 4 - firmware version
             local ver; ver=$(strings "$fw_src" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
             ok "Firmware version: ${ver}"
 
-            # 5 — primary slot warning
+            # 5 - primary slot warning
             if [[ "$slot" == "primary" ]]; then
                 warn "Flashing PRIMARY slot modifies the base recovery image"
                 warn "Ensure optrom contains a valid backup before proceeding"
@@ -2171,7 +2176,7 @@ cmd_fw() {
             echo -e "  Current : ${current_ver}"
             echo -e "  New     : ${ver}"
 
-            # 6 — confirmation
+            # 6 - confirmation
             if [[ $do_yes -eq 0 ]]; then
                 echo -e "\n${YLW}Proceed with flash? [y/N]${NC} \c"
                 read -r answer
@@ -2184,7 +2189,7 @@ cmd_fw() {
                 "$flash_bin" --slot "$slot" --port "$host" "$fw_src"
                 local rc=$?
                 [[ $rc -ne 0 ]] && { err "Flash tool exited with code ${rc}"; return 1; }
-                ok "Flash complete — reload module to verify new firmware"
+                ok "Flash complete - reload module to verify new firmware"
             else
                 info "[DRY-RUN] would run: ${flash_bin} --slot ${slot} --port ${host} ${fw_src}"
             fi
@@ -2324,7 +2329,7 @@ usage() {
     local sep; sep=$(printf '─%.0s' $(seq 1 "$w"))
     printf "%b\n" "$(cat << USAGE_EOF
 
-${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
+${WHT}qle_adm.sh${NC} v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE
 ${DIM}${sep}${NC}
 Deployment   : install
                uninstall
@@ -2368,7 +2373,7 @@ USAGE_EOF
 cmd_help() {
     printf "%b\n" "$(cat << HELP_EOF
 
-${WHT}qle_adm.sh${NC} v${VERSION} — QLogic FC Target Manager for TrueNAS SCALE
+${WHT}qle_adm.sh${NC} v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE
 
 ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before use:
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
@@ -2383,13 +2388,13 @@ ${CYN}Operation:${NC}
                                  --boot   : also loads qla2xxx_scst; used by boot service.
                                             SCST reads the reconstructed scst.conf naturally.
                                  --restart: rebuilds scst.conf then restarts scst.service.
-                                            Warns and confirms before restart — all active
+                                            Warns and confirms before restart - all active
                                             sessions will be dropped.
                                  --system : also write/restore /etc files (modprobe config
                                             and boot service). Implied by --boot. Use
                                             explicitly after a BE change or upgrade when
                                             not running from the boot service.
-                                 (no flag): scst.conf only — live sysfs untouched, no
+                                 (no flag): scst.conf only - live sysfs untouched, no
                                             /etc writes. Safe at any time.
   module <load|unload|reload|status>
                                  Manage the qla2xxx_scst kernel module independently
@@ -2495,7 +2500,7 @@ cmd_examples() {
     }
 
     echo ""
-    echo -e "${WHT}qle_adm.sh${NC} v${VERSION} — Examples"
+    echo -e "${WHT}qle_adm.sh${NC} v${VERSION} - Examples"
     echo ""
 
     exhdr "First-time install"
@@ -2520,7 +2525,7 @@ EX
   # Rebuild scst.conf and restart SCST so it re-reads the file:
   ./qle_adm.sh sync --restart
 
-  # After a BE change or upgrade — restore /etc files AND restart SCST:
+  # After a BE change or upgrade - restore /etc files AND restart SCST:
   ./qle_adm.sh sync --system --restart
 EX
 
