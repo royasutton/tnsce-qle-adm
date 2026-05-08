@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.16
+# Version: 2.17
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.16"
+VERSION="2.17"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1095,9 +1095,19 @@ print(f\"  {'Command':<12} {e['command']}\")
 cmd_uninstall() {
     hdr "Uninstalling qle_adm.sh"
     warn "This will remove all qle_adm-managed configuration files"
-    confirm_or_abort "Proceed with uninstall?"
 
-    cmd_teardown
+    local sessions=0
+    for sess_path in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
+        [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
+    done
+    if [[ $sessions -gt 0 ]]; then
+        warn "${sessions} active FC session(s) will be disconnected"
+        confirm_or_abort "Proceed with uninstall? All active FC sessions will be dropped and qle_adm configuration removed."
+    else
+        confirm_or_abort "Proceed with uninstall? qle_adm configuration will be removed."
+    fi
+
+    cmd_teardown --no-confirm
 
     rm_f_v "$MODPROBE_CONF"
     initscript_remove
@@ -1305,14 +1315,19 @@ cmd_sync() {
 }
 
 cmd_teardown() {
+    local no_confirm=0
+    [[ "${1:-}" == "--no-confirm" ]] && no_confirm=1
+
     hdr "Tearing down FC targets"
     local sessions=0
     for sess_path in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
         [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
     done
-    if [[ $sessions -gt 0 ]]; then
+    if [[ $sessions -gt 0 && $no_confirm -eq 0 ]]; then
         warn "${sessions} active session(s) will be disconnected"
         confirm_or_abort "Continue teardown? Active sessions will be dropped."
+    elif [[ $sessions -gt 0 ]]; then
+        warn "${sessions} active session(s) will be disconnected"
     fi
     teardown_firmware_overlay
     if module_loaded "qla2xxx_scst"; then
