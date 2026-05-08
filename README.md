@@ -69,33 +69,27 @@ Services in the TrueNAS WUI.
 git clone https://github.com/royasutton/tnsce-qle-adm.git
 
 cd tnsce-qle-adm
-export QLE_ADM_HOME=$(pwd)/tnsce-qle-adm
+export QLE_ADM_HOME=$(pwd)
 
-# 1. Make the script executable
 chmod +x ./qle_adm.sh
 
-# 2. Load qla2xxx_scst in target mode.
+# Inject FC target block into scst.conf
+./qle_adm.sh sync
+
+# Load qla2xxx_scst in target mode.
 ./qle_adm.sh module load
 
-# 3. Inject FC target block into scst.conf and restart SCST to read it.
-./qle_adm.sh sync --restart
-
-# 4. Verify SCST, module, ports, and scst.conf block are all good
+# Verify SCST, module, ports, and scst.conf block are all good
 ./qle_adm.sh status
 
-# 5. List available extents and note the index [N]
+# Map (open access) extent on a port for initiator access by index
 ./qle_adm.sh list-extents
-
-# 6. List FC ports and note the index [N] of the port to use
 ./qle_adm.sh list-ports
 
-# 7. Enable the target port (use the index of the P2P port from step 6)
-./qle_adm.sh port enable --port 1
-
-# 8. Open the extent to all initiators
 ./qle_adm.sh open --ext 0
+./qle_adm.sh port enable --port 0
 
-# 9. Verify the mapping and confirm the initiator session is active
+# Verify the mapping and confirm the initiator session is active
 ./qle_adm.sh list-assignments
 ./qle_adm.sh list-initiators
 ```
