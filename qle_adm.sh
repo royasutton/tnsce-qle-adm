@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.15
+# Version: 2.16
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.15"
+VERSION="2.16"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -931,7 +931,7 @@ initscript_install() {
         if [[ $DRY_RUN -eq 0 ]]; then
             midclt call initshutdownscript.update "${existing_id}" \
                 "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT}\"}" \
-                2>/dev/null
+                >/dev/null 2>&1
         else
             info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} ..."
         fi
@@ -1062,6 +1062,7 @@ cmd_install() {
     # Read back and display the registered POSTINIT entry from middleware
     if [[ $DRY_RUN -eq 0 ]]; then
         local entry_id; entry_id=$(cfg_get 'initscript_id' '')
+        [[ -z "$entry_id" ]] && entry_id=$(initscript_find_id)
         if [[ -n "$entry_id" ]]; then
             local entry
             entry=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
