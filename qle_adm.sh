@@ -949,13 +949,13 @@ render_scst_conf() {
     fi
 
     local block
-    block=$(py_json "
+    block=$(python3 << PYEOF 2>/dev/null
 import json, sys
 
 try:
     d = json.load(open('${CONFIG}'))
 except Exception as e:
-    print(f'# qle_adm: failed to load config: {e}', file=sys.stderr)
+    sys.stderr.write(f'qle_adm: config load failed: {e}\n')
     sys.exit(1)
 
 enabled_ports = d.get('enabled_ports', [])
@@ -968,25 +968,23 @@ lines.append('')
 
 for port_idx, wwn in enumerate(enabled_ports):
     rel_tgt_id = port_idx + 10
-    lines.append(f'    TARGET {wwn} {{}')
+    lines.append(f'    TARGET {wwn} {{')
     lines.append(f'        enabled 1')
     lines.append(f'        rel_tgt_id {rel_tgt_id}')
     lines.append('')
 
-    # Open extents: no GROUP wrapper - visible to all initiators
     for lun_idx, ext in enumerate(open_extents):
         lines.append(f'        LUN {lun_idx} {ext}')
 
     if open_extents:
         lines.append('')
 
-    # Per-initiator groups
     for initiator, data in assignments.items():
         extents = data.get('extents', [])
         luns    = data.get('luns', {})
         if not extents:
             continue
-        lines.append(f'        GROUP {initiator} {{}')
+        lines.append(f'        GROUP {initiator} {{')
         lines.append(f'            INITIATOR {initiator}')
         lines.append('')
         for ext in extents:
@@ -1000,10 +998,14 @@ for port_idx, wwn in enumerate(enabled_ports):
 
 lines.append('}')
 print('\n'.join(lines))
-")
+PYEOF
+)
+    local py_exit=$?
 
-    if [[ -z "$block" ]]; then
-        err "render_scst_conf: config.json produced empty block - aborting"
+    if [[ $py_exit -ne 0 || -z "$block" ]]; then
+        err "render_scst_conf: failed to render FC target block"
+        err "Check that ${CONFIG} exists and is valid JSON"
+        err "Run: ls -la ${CONFIG}"
         return 1
     fi
 
@@ -1102,6 +1104,11 @@ WantedBy=multi-user.target"
 
     # Rebuild scst.conf FC target block from config.json
     render_scst_conf || return 1
+
+    local port_count; port_count=$(cfg_get_list "enabled_ports" | grep -c . || true)
+    if [[ "$port_count" -eq 0 ]]; then
+        info "No ports enabled - bare TARGET_DRIVER block written. Use 'port enable' to add targets."
+    fi
 
     if [[ $boot_mode -eq 1 ]]; then
         # Load the target module. SCST starts after this service exits and
