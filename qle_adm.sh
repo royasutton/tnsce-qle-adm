@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.18
+# Version: 2.22
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.18"
+VERSION="2.22"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1722,17 +1722,26 @@ cmd_list_extents() {
     local idx=0
     while IFS= read -r ext; do
         [[ -z "$ext" ]] && continue
-        local status
+        local status assigned assigned_inits _parts _w _lbl
         echo "$open_extents" | grep -q "^${ext}$" && status="${GRN}[open]${NC}" || status="${DIM}[unmapped]${NC}"
-        local assigned
-        assigned=$(py_json "
+        assigned=""
+        assigned_inits=""
+        assigned_inits=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
     inits = [i for i,data in d.get('assignments',{}).items() if '${ext}' in data.get('extents',[])]
-    if inits: print('assigned to: ' + ', '.join(inits))
+    if inits: print(' '.join(inits))
 except: pass
 ")
+        if [[ -n "$assigned_inits" ]]; then
+            _parts=()
+            for _w in $assigned_inits; do
+                _lbl=$(wwn_label "$_w" "initiator")
+                _parts+=("${_w} (${CYN}${_lbl}${NC})")
+            done
+            assigned="assigned to: $(IFS=', '; echo "${_parts[*]}")"
+        fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size=""
         if [[ -d "$dev_path" ]]; then
@@ -1823,17 +1832,25 @@ cmd_list_assignments() {
         done <<< "$open_extents"
     fi
     echo -e "\n${CYN}Per-Initiator Assignments:${NC}"
-    local init_list
-    init_list=$(py_json "
-import json
+    local init_list _tmp
+    _tmp=$(mktemp)
+    cat > "$_tmp" << 'PYEOF'
+import json, sys
+cfg = sys.argv[1]
 try:
-    d = json.load(open('${CONFIG}'))
-    assignments = d.get('assignments', {})
+    d = json.load(open(cfg))
+    assignments = d.get("assignments", {})
     for init, data in assignments.items():
-        luns = ' '.join(f'{data.get('luns',{}).get(ext,i)}:{ext}' for i,ext in enumerate(data.get('extents',[])))
-        print(f'{init} {luns}')
+        luns_map = data.get("luns", {})
+        extents = data.get("extents", [])
+        if not extents:
+            continue
+        pairs = " ".join(str(luns_map.get(ext, i)) + ":" + ext for i, ext in enumerate(extents))
+        print(init + " " + pairs)
 except: pass
-")
+PYEOF
+    init_list=$(python3 "$_tmp" "${CONFIG}" 2>/dev/null)
+    rm -f "$_tmp"
     if [[ -z "$init_list" ]]; then
         echo -e "  ${DIM}(none)${NC}"
     else
@@ -1946,22 +1963,29 @@ cmd_assign() {
     get_extents_sorted | grep -q "^${extent}$" || { err "Extent '${extent}' not found"; return 1; }
 
     # Warn if extent already assigned to another initiator
-    local existing
-    existing=$(py_json "
+    local existing_wwns
+    existing_wwns=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
     others = [i for i,data in d.get('assignments',{}).items()
               if '${extent}' in data.get('extents',[]) and i != '${initiator}']
-    if others: print(', '.join(others))
+    if others: print(' '.join(others))
 except: pass
 ")
-    if [[ -n "$existing" ]]; then
-        warn "Extent '${extent}' is already assigned to: ${existing}"
+    if [[ -n "$existing_wwns" ]]; then
+        local _ep=() _ew
+        for _ew in $existing_wwns; do
+            local _el; _el=$(wwn_label "$_ew" "initiator")
+            _ep+=("${_ew} (${_el})")
+        done
+        local _existing_lbl; _existing_lbl=$(IFS=', '; echo "${_ep[*]}")
+        warn "Extent '${extent}' is already assigned to: ${_existing_lbl}"
         confirm_or_abort "Assign to ${initiator} as well?"
     fi
 
-    info "Assigning ${extent} to ${initiator}"
+    local _albl; _albl=$(wwn_label "$initiator" "initiator")
+    info "Assigning ${extent} to ${initiator} (${_albl})"
     py_json "
 import json
 d = json.load(open('${CONFIG}'))
@@ -1981,6 +2005,12 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
         local tgt_path; tgt_path=$(scst_target_path "$wwn")
         [[ -d "$tgt_path" ]] || continue
         local grp_path="${tgt_path}/ini_groups/${initiator}"
+        # Only apply sysfs on ports where the initiator has an active session.
+        # Ports without a session (e.g. LPort with no connected initiator) will
+        # reject ini_groups/mgmt writes with EINVAL. Skip them silently.
+        if [[ ! -d "${tgt_path}/sessions/${initiator}" && ! -d "$grp_path" ]]; then
+            continue
+        fi
         if [[ ! -d "$grp_path" ]]; then
             sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${initiator}" || true
             sysfs_write "${grp_path}/initiators/mgmt" "add ${initiator}" || true
@@ -1992,12 +2022,12 @@ data = d.get('assignments', {}).get('${initiator}', {})
 for i, ext in enumerate(data.get('extents', [])):
     lun = data.get('luns', {}).get(ext, i)
     print(f'{lun} {ext}')
-" | while IFS= read -r lun_id ext_name; do
+" | while read -r lun_id ext_name; do
             [[ ! -d "${grp_path}/luns/${lun_id}" ]] && \
                 sysfs_write "${grp_path}/luns/mgmt" "add ${ext_name} ${lun_id}" || true
         done
     done < <(cfg_get_list "enabled_ports")
-    ok "Assigned ${extent} to ${initiator}"
+    ok "Assigned ${extent} to ${initiator} (${_albl})"
 }
 
 cmd_unassign() {
@@ -2006,7 +2036,8 @@ cmd_unassign() {
     local initiator; initiator=$(resolve_initiator "$init_arg" "$init_idx")
     [[ -z "$extent" || -z "$initiator" ]] && { err "Usage: unassign <extent>|--ext N <wwn>|--init N"; return 1; }
     initiator=$(echo "$initiator" | tr '[:upper:]' '[:lower:]')
-    warn "Removing ${extent} from ${initiator}"
+    local _ulbl; _ulbl=$(wwn_label "$initiator" "initiator")
+    warn "Removing ${extent} from ${initiator} (${_ulbl})"
     py_json "
 import json
 d = json.load(open('${CONFIG}'))
@@ -2031,7 +2062,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
             fi
         done
     done < <(cfg_get_list "enabled_ports")
-    ok "Unassigned ${extent} from ${initiator}"
+    ok "Unassigned ${extent} from ${initiator} (${_ulbl})"
 }
 
 cmd_clear() {
@@ -2223,7 +2254,8 @@ cmd_stats() {
                 wc=$(hex_to_dec   "$(sysfs_read "${sess_path}/write_cmd_count")")
                 rk=$(hex_to_dec   "$(sysfs_read "${sess_path}/read_io_count_kb")")
                 wk=$(hex_to_dec   "$(sysfs_read "${sess_path}/write_io_count_kb")")
-                echo -e "\n  ${GRN}[${si}] Session:${NC} ${init_wwn}"
+                local _slbl; _slbl=$(wwn_label "$init_wwn" "initiator")
+                echo -e "\n  ${GRN}[${si}] Session:${NC} ${init_wwn} (${CYN}${_slbl}${NC})"
                 printf "    %-20s %d\n" "Active Commands:"  "$ac"
                 printf "    %-20s %d\n" "Total Commands:"   "$cmds"
                 printf "    %-20s %d cmds  /  %d KB\n" "Read:"  "$rc" "$rk"
