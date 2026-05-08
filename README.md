@@ -135,13 +135,10 @@ Init/Shutdown Scripts in the WUI.
 
 ```bash
 ./qle_adm.sh sync --system --restart
-./qle_adm.sh status
 ```
 
-`--system` restores the modprobe config in `/etc` from config.json. `--restart`
-restarts SCST so it reads the updated scst.conf in one step. The POSTINIT boot
-entry in the TrueNAS middleware database is unaffected by upgrades and BE
-changes - no reinstall is needed.
+Restores the modprobe config and rebuilds scst.conf from config.json.
+The POSTINIT boot entry survives upgrades automatically.
 
 ---
 
@@ -164,36 +161,6 @@ changes - no reinstall is needed.
 ```bash
 ./qle_adm.sh sync --system --restart
 ```
-
----
-
-## After a WUI iSCSI save
-
-The WUI rewrites scst.conf and wipes the FC target block. Rebuild it:
-
-```bash
-./qle_adm.sh sync
-```
-
-This rebuilds scst.conf from config.json. Live sysfs state and active
-sessions are not touched.
-
----
-
-## What survives what
-
-| Location | Reboot | BE change | Upgrade |
-|---|---|---|---|
-| `/mnt/<pool>/` | ✓ | ✓ | ✓ |
-| TrueNAS middleware DB | ✓ | ✓ | ✓ |
-| `/etc/` | ✓ | ✗ wiped | ✗ wiped |
-| `/root/` | ✓ | ✗ wiped | ✗ wiped |
-| `/run/` | ✗ tmpfs | ✗ | ✗ |
-
-`config.json` lives on `/mnt` and survives everything. The POSTINIT boot
-entry lives in the TrueNAS middleware database and also survives all
-lifecycle events. The modprobe config in `/etc` is the only file that
-needs restoring after a BE change - `sync --system` handles this.
 
 ---
 
