@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.11
+# Version: 2.12
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.11"
+VERSION="2.12"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -639,6 +639,8 @@ except:
 get_applied_params() {
     # Read actual running module parameters from sysfs.
     # Returns reconstructed param string, or empty if module not loaded.
+    # Note: qlini_mode sysfs returns a numeric value (0/1/2); normalize
+    # back to the string form (disabled/enabled/dual) to match config.json.
     local mod="qla2xxx_scst"
     module_loaded "$mod" || { echo ""; return; }
     local base="/sys/module/${mod}/parameters"
@@ -647,6 +649,12 @@ get_applied_params() {
     local fc2;   fc2=$(cat "${base}/ql2xfc2target"    2>/dev/null || echo "")
     local nvme;  nvme=$(cat "${base}/ql2xnvmeenable"  2>/dev/null || echo "")
     local fwbin; fwbin=$(cat "${base}/ql2xfwloadbin"  2>/dev/null || echo "")
+    # Normalize qlini_mode numeric -> string
+    case "$qlini" in
+        0) qlini="disabled" ;;
+        1) qlini="enabled"  ;;
+        2) qlini="dual"     ;;
+    esac
     [[ -n "$qlini" ]] && result+="qlini_mode=${qlini} "
     [[ -n "$fc2"   ]] && result+="ql2xfc2target=${fc2} "
     [[ -n "$nvme"  ]] && result+="ql2xnvmeenable=${nvme} "
