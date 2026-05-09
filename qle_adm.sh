@@ -1855,17 +1855,19 @@ cmd_list_extents() {
             && status="${GRN}[open]${NC}" \
             || status="${DIM}[assigned]${NC}"
 
-        # Live sysfs status: check whether this extent is active as a LUN
-        # in the running SCST instance. [live] = mapping present in sysfs.
-        # [no sysfs] = configured but not applied - run 'sync --apply'.
+        # Live sysfs status: each lun directory under qla2x00t ini_groups
+        # contains a 'device' symlink pointing to
+        # ../../../../../../../devices/<extent-name>. Read the symlink and
+        # compare the final path component to the extent name.
+        # [live] = mapping present in sysfs. [no sysfs] = configured but
+        # not applied - run 'sync --apply'.
         local lun_found=0
         if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
-            for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/*/; do
-                [[ -e "$lun_dir" ]] || continue
-                local resolved; resolved=$(readlink -f "${lun_dir%/}" 2>/dev/null || true)
-                if [[ "$(basename "$resolved")" == "$ext" ]]; then
-                    lun_found=1
-                    break
+            for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/[0-9]*/; do
+                [[ -L "${lun_dir}device" ]] || continue
+                local dev_target; dev_target=$(readlink -f "${lun_dir}device" 2>/dev/null || true)
+                if [[ "$(basename "$dev_target")" == "$ext" ]]; then
+                    lun_found=1; break
                 fi
             done
         fi
