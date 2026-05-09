@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.25"
+VERSION="2.26"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1335,14 +1335,15 @@ cmd_sync() {
         # Name any target ports that don't yet have a name entry. This handles
         # HBAs added after initial install without requiring a manual name set.
         auto_name_target_ports
-        # Load the target module. SCST starts after this service exits and
-        # reads the reconstructed scst.conf naturally - no sysfs apply needed.
-        if ! module_loaded "qla2xxx_scst"; then
-            load_target_module "$isp_type"
-            sleep 5
-        else
-            ok "qla2xxx_scst already loaded"
-        fi
+        # Always reload the module unconditionally. The kernel autoloads
+        # qla2xxx_scst via udev before POSTINIT runs, with default params.
+        # The conditional skip that was here left wrong params in place for
+        # the entire session. load_target_module calls modprobe -r first so
+        # this is safe. Restart SCST after the reload - it starts concurrently
+        # with POSTINIT and may have initialized against the wrong module.
+        load_target_module "$isp_type"
+        sleep 5
+        systemctl restart scst
         ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then
