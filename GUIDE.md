@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.26: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.27: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -221,7 +221,7 @@ or by full path `${QLE_ADM_HOME}/qle_adm.sh <command>`.
 
 | Command | Description |
 |---|---|
-| `sync [--boot] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params (the kernel autoloads the module before POSTINIT with default params; the conditional skip that was here left wrong params in place). SCST starts after POSTINIT exits and reads the reconstructed scst.conf naturally - no restart is needed or performed. Used by the POSTINIT boot entry. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
+| `sync [--boot] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params (the kernel autoloads the module before POSTINIT with default params; the conditional skip that was here left wrong params in place), then polls for `qla2x00t` registration and applies config via scstadmin non-disruptively. `--apply` rebuilds scst.conf then applies it to the live SCST sysfs tree via scstadmin - no restart, no session drops. Use when `list-extents` shows `[no sysfs]`. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -284,7 +284,7 @@ authoritative source for param drift detection.
 | `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `stats [--watch] [--wide]` | IO counters and link error stats |
 | `list-ports` | FC ports with index, state, topology, managed status |
-| `list-extents` | SCST extents with size, open/assigned state |
+| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[live]`/`[no sysfs]`). `[no sysfs]` = configured but not active - run `sync --apply` |
 | `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-assignments` | Per-initiator LUN mappings |
 | `list-all` | All five list commands in sequence |
@@ -678,11 +678,16 @@ At boot, `sync --boot` also unconditionally reloads `qla2xxx_scst` before
 SCST starts. The kernel autoloads the module via udev before any POSTINIT
 script runs, with default params rather than configured params. The reload
 corrects the params so that when SCST starts after POSTINIT exits it reads
-scst.conf against a correctly initialized module. No SCST restart is performed
-by `sync --boot` - restarting SCST from outside the TrueNAS middleware causes
-the WUI to lose track of the iSCSI service state and report it as not running,
-which prompts the operator to restart it through the WUI, which regenerates
-scst.conf from the iSCSI database only and wipes the FC target block.
+scst.conf against a correctly initialized module.
+
+After the reload, `sync --boot` polls for `qla2x00t` to register with SCST
+(up to 60 seconds) then applies scst.conf non-disruptively via `scstadmin`.
+This ensures LUN mappings are active without requiring a service restart.
+No SCST restart is performed by `sync --boot` - restarting SCST from outside
+the TrueNAS middleware causes the WUI to lose track of the iSCSI service state
+and report it as not running, which prompts the operator to restart it through
+the WUI, which regenerates scst.conf from the iSCSI database only and wipes
+the FC target block.
 
 ---
 

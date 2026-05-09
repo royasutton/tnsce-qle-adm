@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.26"
+VERSION="2.27"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1287,13 +1287,65 @@ PYEOF
     log "render_scst_conf: rewrote TARGET_DRIVER qla2x00t block in ${conf}"
 }
 
+# Apply /etc/scst.conf to the live SCST sysfs tree via scstadmin.
+# Non-disruptive: adds/removes LUN entries incrementally, no restart,
+# no session drops. Fails cleanly if qla2x00t is not yet registered.
+# Optional first arg: timeout in seconds to wait for qla2x00t (default 0).
+scstadmin_apply() {
+    local wait_secs="${1:-0}"
+
+    # Optionally poll for qla2x00t registration (used by --boot)
+    if [[ $wait_secs -gt 0 ]]; then
+        local elapsed=0
+        while [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]] && \
+              [[ $elapsed -lt $wait_secs ]]; do
+            sleep 1
+            elapsed=$((elapsed + 1))
+        done
+        if [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            warn "qla2x00t not registered with SCST after ${wait_secs}s - skipping scstadmin apply"
+            warn "Run 'sync --apply' once SCST has started"
+            return 1
+        fi
+        info "qla2x00t registered after ${elapsed}s"
+    else
+        # Preflight - fail clearly rather than letting scstadmin produce a
+        # cryptic FATAL error
+        if [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            err "qla2x00t is not registered with SCST"
+            err "SCST may not be running or the module loaded after SCST started"
+            err "Try 'sync --restart' to do a full restart, or wait and retry 'sync --apply'"
+            return 1
+        fi
+    fi
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "[DRY-RUN] scstadmin -force -noprompt -config ${SCST_CONF}"
+        return 0
+    fi
+
+    local tmpout; tmpout=$(mktemp)
+    if scstadmin -force -noprompt -config "${SCST_CONF}" >"$tmpout" 2>&1; then
+        local changes; changes=$(grep -c "done\." "$tmpout" 2>/dev/null || echo 0)
+        ok "scstadmin applied ${SCST_CONF} (${changes} change(s))"
+        rm -f "$tmpout"
+        return 0
+    else
+        err "scstadmin apply failed:"
+        cat "$tmpout" >&2
+        rm -f "$tmpout"
+        return 1
+    fi
+}
+
 
 cmd_sync() {
-    local boot_mode=0 restart_mode=0 system_mode=0
+    local boot_mode=0 restart_mode=0 system_mode=0 apply_mode=0
     for arg in "$@"; do
         [[ "$arg" == "--boot" ]]    && boot_mode=1
         [[ "$arg" == "--restart" ]] && restart_mode=1
         [[ "$arg" == "--system" ]]  && system_mode=1
+        [[ "$arg" == "--apply" ]]   && apply_mode=1
     done
     # --boot always implies --system (boot service owns /etc file restoration)
     [[ $boot_mode -eq 1 ]] && system_mode=1
@@ -1301,6 +1353,7 @@ cmd_sync() {
     local mode_label=""
     [[ $boot_mode    -eq 1 ]] && mode_label+=" (boot)"
     [[ $restart_mode -eq 1 ]] && mode_label+=" (restart)"
+    [[ $apply_mode   -eq 1 ]] && mode_label+=" (apply)"
     [[ $system_mode  -eq 1 ]] && mode_label+=" (system)"
     hdr "Sync${mode_label}"
     cfg_init
@@ -1340,10 +1393,15 @@ cmd_sync() {
         # The conditional skip that was here left wrong params in place for
         # the entire session. load_target_module calls modprobe -r first so
         # this is safe. SCST starts after POSTINIT exits and reads the
-        # reconstructed scst.conf naturally - no restart needed.
+        # reconstructed scst.conf naturally.
         load_target_module "$isp_type"
         sleep 5
-        ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
+        # Poll for qla2x00t registration then apply scst.conf non-disruptively.
+        # SCST starts after POSTINIT exits; qla2x00t registers as the driver
+        # initializes. We wait up to 60s for registration then apply config
+        # via scstadmin so LUN mappings are active without a service restart.
+        scstadmin_apply 60 || true
+        ok "Boot sync complete - SCST FC targets initialized from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then
         # Restart the running SCST service so it re-reads the updated scst.conf.
@@ -1364,9 +1422,18 @@ cmd_sync() {
             info "[DRY-RUN] systemctl restart scst"
         fi
 
+    elif [[ $apply_mode -eq 1 ]]; then
+        # Apply scst.conf to the live SCST sysfs tree non-disruptively.
+        # No restart, no session drops. Requires SCST to be running and
+        # qla2x00t to be registered. Use when LUN mappings are out of sync
+        # with scst.conf without wanting the disruption of --restart.
+        scstadmin_apply 0 || return 1
+        ok "Sync --apply complete - live sysfs updated from scst.conf"
+
     else
         ok "Sync complete - scst.conf updated from config.json"
-        info "Live sysfs state not touched. Use 'sync --restart' to restart SCST if required."
+        info "Live sysfs state not touched. Use 'sync --apply' to apply non-disruptively,"
+        info "or 'sync --restart' to restart SCST (drops all active sessions)."
     fi
     divider
 }
@@ -1779,8 +1846,33 @@ cmd_list_extents() {
     local idx=0
     while IFS= read -r ext; do
         [[ -z "$ext" ]] && continue
-        local status assigned assigned_inits _parts _w _lbl
-        echo "$open_extents" | grep -q "^${ext}$" && status="${GRN}[open]${NC}" || status="${DIM}[unmapped]${NC}"
+        local status live_status assigned assigned_inits _parts _w _lbl
+
+        # Config-level status: [open] = in open_extents (world-accessible,
+        # no initiator restriction). [assigned] = per-initiator assignment
+        # (or truly unmapped - see live sysfs status for the distinction).
+        echo "$open_extents" | grep -q "^${ext}$" \
+            && status="${GRN}[open]${NC}" \
+            || status="${DIM}[assigned]${NC}"
+
+        # Live sysfs status: check whether this extent is active as a LUN
+        # in the running SCST instance. [live] = mapping present in sysfs.
+        # [no sysfs] = configured but not applied - run 'sync --apply'.
+        local lun_found=0
+        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/*/; do
+                [[ -e "$lun_dir" ]] || continue
+                local resolved; resolved=$(readlink -f "${lun_dir%/}" 2>/dev/null || true)
+                if [[ "$(basename "$resolved")" == "$ext" ]]; then
+                    lun_found=1
+                    break
+                fi
+            done
+        fi
+        [[ $lun_found -eq 1 ]] \
+            && live_status="${GRN}[live]${NC}" \
+            || live_status="${YLW}[no sysfs]${NC}"
+
         assigned=""
         assigned_inits=""
         assigned_inits=$(py_json "
@@ -1806,9 +1898,9 @@ except: pass
             if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
                 size=$(python3 -c "
 mb = int('${size_mb_raw}')
-kib = mb * 1024
-mib = mb
 gib = mb / 1024.0
+mib = mb
+kib = mb * 1024
 if gib >= 1.0:
     print(f'{gib:6.2f} GiB')
 elif mib >= 1:
@@ -1818,7 +1910,7 @@ else:
 " 2>/dev/null || echo "${size_mb_raw} MB")
             fi
         fi
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}${assigned:+  ${assigned}}"
+        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${assigned:+  ${assigned}}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
     [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in /etc/scst.conf${NC}" || true
@@ -2719,7 +2811,12 @@ ${CYN}Operation:${NC}
   sync [--boot] [--restart] [--system]
                                  Rebuild scst.conf from config.json.
                                  --boot   : also loads qla2xxx_scst; used by boot service.
-                                            SCST reads the reconstructed scst.conf naturally.
+                                            Polls for qla2x00t registration then applies
+                                            config non-disruptively via scstadmin.
+                                 --apply  : rebuild scst.conf then apply to live SCST via
+                                            scstadmin. Non-disruptive - no restart, no
+                                            session drops. Use when extents show [no sysfs]
+                                            or after any manual scst.conf change.
                                  --restart: rebuilds scst.conf then restarts scst.service.
                                             Warns and confirms before restart - all active
                                             sessions will be dropped.
@@ -2747,7 +2844,8 @@ ${CYN}Status:${NC}
   stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
   list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN
   list-ports                     FC ports with managed/unmanaged state and index [N]
-  list-extents                   SCST extents with size, open/assigned state, index [N]
+  list-extents                   SCST extents with size, config state [open|assigned],
+                                 and live sysfs state [live|no sysfs], index [N]
   list-initiators                Connected initiators with IO stats; seen history always shown
   list-assignments               Per-initiator LUN mappings
   list-all                       Runs all five list commands in sequence
@@ -2840,6 +2938,11 @@ EX
 
   # After a WUI iSCSI save that wiped the FC target block (scst.conf only):
   ./qle_adm.sh sync
+
+  # Apply scst.conf to live SCST non-disruptively (no restart, no session drops):
+  # Use when list-extents shows [no sysfs] or after qla2x00t was not registered
+  # at boot time.
+  ./qle_adm.sh sync --apply
 
   # After a BE change or upgrade that wiped /etc files:
   ./qle_adm.sh sync --system

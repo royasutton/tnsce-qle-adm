@@ -133,10 +133,13 @@ QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 ```
 
 From this point the configuration is persistent. On every boot, the TrueNAS
-POSTINIT init script registered by `install` runs `sync --boot --system`
-before SCST starts - rebuilding scst.conf from config.json and loading the
-module. The entry is visible and manageable under System > Advanced >
-Init/Shutdown Scripts in the WUI.
+POSTINIT init script registered by `install` runs `sync --boot --system`.
+It unconditionally reloads `qla2xxx_scst` with configured params - the kernel
+autoloads the module before POSTINIT runs with default params, so the reload
+is always required. SCST starts after POSTINIT exits and reads the
+reconstructed scst.conf, initializing all FC target state from it. The entry
+is visible and manageable under System > Advanced > Init/Shutdown Scripts in
+the WUI.
 
 ---
 
