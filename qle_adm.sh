@@ -6,21 +6,26 @@
 # Persistent store: set QLE_ADM_HOME to a dataset under /mnt
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
+# Environment variables (set in ~/.bashrc or ~/.zshrc):
+#   QLE_ADM_HOME        Path to persistent store (required)
+#   QLE_ADM_USE_COLOR   0 = disable ANSI color output (default 1)
+#   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
+#
 # Requires: bash, python3 (JSON only)
 # Version: 2.25
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.31"
+VERSION="2.32"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
 LOG="${QLE_ADM_HOME}/qle_adm.log"
 
-USE_COLOR=1    # 0 = no ANSI color codes in output
-USE_UNICODE=1  # 0 = ASCII fallback for symbols (─ ● ✓ ⚠ ✗ →)
+QLE_ADM_USE_COLOR="${QLE_ADM_USE_COLOR:-1}"     # 0 = no ANSI color codes in output
+QLE_ADM_USE_UNICODE="${QLE_ADM_USE_UNICODE:-1}" # 0 = ASCII fallback for symbols (─ ● ✓ ⚠ ✗ →)
 
 # ISP type to firmware file mapping
 declare -A ISP_FW_FILE=(
@@ -48,7 +53,7 @@ CYN='\033[0;36m'
 WHT='\033[1;37m'
 DIM='\033[2m'
 NC='\033[0m'
-[[ $USE_COLOR -eq 0 ]] && RED="" && GRN="" && YLW="" && BLU="" && CYN="" && WHT="" && DIM="" && NC=""
+[[ $QLE_ADM_USE_COLOR -eq 0 ]] && RED="" && GRN="" && YLW="" && BLU="" && CYN="" && WHT="" && DIM="" && NC=""
 
 # ─── Symbols ──────────────────────────────────────────────────────────────────
 SYM_OK="✓"
@@ -57,7 +62,7 @@ SYM_ERR="✗"
 SYM_INFO="→"
 SYM_BULLET="●"
 SYM_HBAR="─"
-[[ $USE_UNICODE -eq 0 ]] && SYM_OK="*" && SYM_WARN="!" && SYM_ERR="x" && SYM_INFO=">" && SYM_BULLET="*" && SYM_HBAR="-"
+[[ $QLE_ADM_USE_UNICODE -eq 0 ]] && SYM_OK="*" && SYM_WARN="!" && SYM_ERR="x" && SYM_INFO=">" && SYM_BULLET="*" && SYM_HBAR="-"
 
 ok()   { echo -e "${GRN}${SYM_OK}${NC} $*";         log "ok: $*"; }
 warn() { echo -e "${YLW}${SYM_WARN}${NC}  $*";      log "warn: $*"; }
@@ -946,10 +951,9 @@ fw_dist_marker() {
 # fw_store_versioned <isp_type> <src_file> <base_ver> <source_tag>
 # Stores a firmware file in the versioned directory structure.
 # <source_tag> is one of: os, hba, imported — used for disambiguation on collision.
-# If the version directory already exists:
-#   - SHA256 match: no-op, prints ok message
-#   - SHA256 mismatch: stores in <base_ver>-<source_tag>/ directory
-# Returns the final version directory name (for marker placement by caller).
+# Result (final version directory name) is written to global _FW_STORED_VER.
+# Do NOT call in a subshell - ok/warn messages print to terminal directly.
+_FW_STORED_VER=""
 fw_store_versioned() {
     local isp_type="$1" src_file="$2" base_ver="$3" source_tag="$4"
     local fw_file="${ISP_FW_FILE[$isp_type]:-}"
@@ -958,13 +962,12 @@ fw_store_versioned() {
     local dest_file="${dest_dir}/${fw_file}"
 
     if [[ -d "$dest_dir" && -f "$dest_file" ]]; then
-        # Version directory already exists - compare SHA256
         local sha_new sha_existing
         sha_new=$(sha256sum "$src_file" 2>/dev/null | awk '{print $1}')
         sha_existing=$(sha256sum "$dest_file" 2>/dev/null | awk '{print $1}')
         if [[ "$sha_new" == "$sha_existing" ]]; then
             ok "Version ${base_ver} already stored - content identical (SHA256 match), skipping"
-            echo "$dest_ver"
+            _FW_STORED_VER="$dest_ver"
             return 0
         else
             warn "Version ${base_ver} already stored but content differs (SHA256 mismatch)"
@@ -979,11 +982,11 @@ fw_store_versioned() {
     if [[ $DRY_RUN -eq 0 ]]; then
         mkdir -p "$dest_dir"
         cp "$src_file" "$dest_file"
-        ok "Stored ${isp_type} firmware v${base_ver} ${SYM_INFO} ${dest_file}"
+        ok "Stored ${isp_type} firmware v${dest_ver} ${SYM_INFO} ${dest_file}"
     else
         info "[DRY-RUN] mkdir -p ${dest_dir} && cp ${src_file} ${dest_file}"
     fi
-    echo "$dest_ver"
+    _FW_STORED_VER="$dest_ver"
 }
 
 
@@ -1228,6 +1231,8 @@ cmd_install() {
     echo -e "  ${CYN}Add to your shell startup script (e.g. ~/.bashrc or ~/.zshrc):${NC}"
     echo -e "  ${WHT}export QLE_ADM_HOME=${QLE_ADM_HOME}${NC}"
     echo -e "  ${WHT}PATH=\"\${PATH}:\${QLE_ADM_HOME}\"${NC}"
+    echo -e "  ${DIM}# export QLE_ADM_USE_COLOR=0      # disable color output${NC}"
+    echo -e "  ${DIM}# export QLE_ADM_USE_UNICODE=0    # ASCII symbols fallback${NC}"
 
     # Read back and display the registered POSTINIT entry from middleware
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -2813,7 +2818,7 @@ cmd_fw() {
             local marker="os_${tn_ver}"
             info "Saving OS firmware ${isp_type} v${ver} from ${src}"
             info "TrueNAS version: ${tn_ver}"
-            local stored_ver; stored_ver=$(fw_store_versioned "$isp_type" "$src" "$ver" "os")
+            local stored_ver; fw_store_versioned "$isp_type" "$src" "$ver" "os"; stored_ver="$_FW_STORED_VER"
             if [[ $DRY_RUN -eq 0 && -d "${FIRMWARE_DIR}/${isp_type}/${stored_ver}" ]]; then
                 # Place marker only if not already present
                 local existing_marker; existing_marker=$(find "${FIRMWARE_DIR}/${isp_type}/${stored_ver}/" -maxdepth 1 -name "os_*" 2>/dev/null | head -1)
@@ -2846,7 +2851,7 @@ cmd_fw() {
                 local sz; sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
                 [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty - driver may not support optrom extraction"; rm -f "$tmp"; return 1; }
                 local ver; ver=$(fw_extract_version "$tmp")
-                fw_store_versioned "$isp_type" "$tmp" "$ver" "hba" > /dev/null
+                fw_store_versioned "$isp_type" "$tmp" "$ver" "hba"
                 rm -f "$tmp"
             else
                 info "[DRY-RUN] echo 1 > ${optrom_ctl} && dd ${optrom_path} -> versioned store && echo 0 > ${optrom_ctl}"
@@ -2862,7 +2867,7 @@ cmd_fw() {
             [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}. Known: ${!ISP_FW_FILE[*]}"; return 1; }
             local ver; ver=$(fw_extract_version "$fw_path")
             info "Adding ${isp_type} firmware v${ver}"
-            fw_store_versioned "$isp_type" "$fw_path" "$ver" "imported" > /dev/null
+            fw_store_versioned "$isp_type" "$fw_path" "$ver" "imported"
             ;;
         remove)
             local isp_type="${1:-}" ver="${2:-}"

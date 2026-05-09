@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.31: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.32: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -157,6 +157,10 @@ ${QLE_ADM_HOME}/qle_adm.sh --yes install
 export QLE_ADM_HOME=/mnt/${POOL}/admin/qle_adm
 PATH="${PATH}:${QLE_ADM_HOME}"
 
+# Optional: disable color or unicode symbols if your terminal doesn't support them
+# export QLE_ADM_USE_COLOR=0
+# export QLE_ADM_USE_UNICODE=0
+
 # Inject FC target block into scst.conf before loading the module
 ${QLE_ADM_HOME}/qle_adm.sh sync
 
@@ -213,6 +217,24 @@ from the install directory.
 | `--port N` | Select FC port by index from `list-ports` |
 | `--init N` | Select initiator by index from `list-initiators` |
 | `--ext N` | Select extent by index from `list-extents` |
+
+### Environment variables
+
+Set these in `~/.bashrc` or `~/.zshrc`. All are optional except `QLE_ADM_HOME`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `QLE_ADM_HOME` | *(required)* | Path to persistent store on a dataset under `/mnt` |
+| `QLE_ADM_USE_COLOR` | `1` | Set to `0` to disable ANSI color codes in output |
+| `QLE_ADM_USE_UNICODE` | `1` | Set to `0` for ASCII fallback symbols (`* ! x > -`) |
+
+Example `~/.bashrc` block:
+```bash
+export QLE_ADM_HOME=/mnt/tank/local/admin/tnsce-qle-adm
+PATH="${PATH}:${QLE_ADM_HOME}"
+# export QLE_ADM_USE_COLOR=0      # uncomment if terminal has no color support
+# export QLE_ADM_USE_UNICODE=0    # uncomment if terminal can't render Unicode
+```
 
 ### Deployment
 
