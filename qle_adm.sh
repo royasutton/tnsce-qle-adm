@@ -1695,6 +1695,21 @@ cmd_status() {
         gaps=$((gaps + 1))
     fi
 
+    # Verify qla2x00t is actually registered with the running SCST instance.
+    # The module registers with SCST at load time - if SCST wasn't running when
+    # the module loaded, registration is lost and qla2x00t will be absent from
+    # sysfs even though scst.conf and the module are both present. This is the
+    # definitive check for a functional FC target stack.
+    if [[ $scst_sysfs -eq 1 ]]; then
+        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            ok "qla2x00t registered with SCST"
+        else
+            gap "qla2x00t not registered with SCST - module was loaded before SCST started"
+            gap "Run 'sync --restart' to reload the module while SCST is running"
+            gaps=$((gaps + 2))
+        fi
+    fi
+
     # Param drift check
     local isp_type; isp_type=$(get_isp_type_dominant 2>/dev/null || echo "")
     if [[ -n "$isp_type" ]] && module_loaded "qla2xxx_scst"; then
