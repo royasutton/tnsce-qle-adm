@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.24
+# Version: 2.25
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.24"
+VERSION="2.25"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -60,10 +60,10 @@ SYM_BULLET="●"
 SYM_HBAR="─"
 [[ $USE_UNICODE -eq 0 ]] && SYM_OK="*" && SYM_WARN="!" && SYM_ERR="x" && SYM_INFO=">" && SYM_BULLET="*" && SYM_HBAR="-"
 
-ok()   { echo -e "${GRN}${SYM_OK}${NC} $*"; }
-warn() { echo -e "${YLW}${SYM_WARN}${NC}  $*"; }
-err()  { echo -e "${RED}${SYM_ERR}${NC} $*" >&2; }
-info() { echo -e "${BLU}${SYM_INFO}${NC} $*" >&2; }
+ok()   { echo -e "${GRN}${SYM_OK}${NC} $*";         log "ok: $*"; }
+warn() { echo -e "${YLW}${SYM_WARN}${NC}  $*";      log "warn: $*"; }
+err()  { echo -e "${RED}${SYM_ERR}${NC} $*" >&2;    log "err: $*"; }
+info() { echo -e "${BLU}${SYM_INFO}${NC} $*" >&2;   log "info: $*"; }
 gap()  { echo -e "${RED}GAP${NC} $*"; }
 terminal_width() {
     local w
