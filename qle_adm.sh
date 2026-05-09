@@ -1339,11 +1339,10 @@ cmd_sync() {
         # qla2xxx_scst via udev before POSTINIT runs, with default params.
         # The conditional skip that was here left wrong params in place for
         # the entire session. load_target_module calls modprobe -r first so
-        # this is safe. Restart SCST after the reload - it starts concurrently
-        # with POSTINIT and may have initialized against the wrong module.
+        # this is safe. SCST starts after POSTINIT exits and reads the
+        # reconstructed scst.conf naturally - no restart needed.
         load_target_module "$isp_type"
         sleep 5
-        systemctl restart scst
         ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then

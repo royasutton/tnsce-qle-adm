@@ -221,7 +221,7 @@ or by full path `${QLE_ADM_HOME}/qle_adm.sh <command>`.
 
 | Command | Description |
 |---|---|
-| `sync [--boot] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params (the kernel autoloads the module before POSTINIT with default params; the conditional skip that was here left wrong params in place), then restarts SCST so it initializes against the correct module. Used by the POSTINIT boot entry. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
+| `sync [--boot] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params (the kernel autoloads the module before POSTINIT with default params; the conditional skip that was here left wrong params in place). SCST starts after POSTINIT exits and reads the reconstructed scst.conf naturally - no restart is needed or performed. Used by the POSTINIT boot entry. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -675,11 +675,14 @@ are not yet mapped. Runtime changes continue through sysfs for zero disruption
 to active sessions.
 
 At boot, `sync --boot` also unconditionally reloads `qla2xxx_scst` before
-restarting SCST. The kernel autoloads the module via udev before any POSTINIT
-script runs, with default params rather than configured params. SCST starts
-concurrently with POSTINIT, so by the time POSTINIT runs, SCST may have already
-initialized against the wrong module. The reload corrects the params and the
-SCST restart ensures it initializes against the corrected module.
+SCST starts. The kernel autoloads the module via udev before any POSTINIT
+script runs, with default params rather than configured params. The reload
+corrects the params so that when SCST starts after POSTINIT exits it reads
+scst.conf against a correctly initialized module. No SCST restart is performed
+by `sync --boot` - restarting SCST from outside the TrueNAS middleware causes
+the WUI to lose track of the iSCSI service state and report it as not running,
+which prompts the operator to restart it through the WUI, which regenerates
+scst.conf from the iSCSI database only and wipes the FC target block.
 
 ---
 
