@@ -7,12 +7,12 @@
 # Example: QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.22
+# Version: 2.24
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.22"
+VERSION="2.24"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -822,6 +822,55 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 }
 
 
+
+# auto_name_target_ports
+# Names all detected target port WWNs using the short hostname and port index.
+# Only names ports that have no existing entry in wwn_names - never overwrites
+# a name set manually by the operator. Safe to call on every boot (idempotent).
+auto_name_target_ports() {
+    local hostname_short
+    hostname_short=$(hostname -s 2>/dev/null || echo "nas")
+    local named=0 skipped=0
+    while IFS= read -r hba_line; do
+        local idx wwn
+        idx=$(echo "$hba_line" | awk '{print $1}')
+        wwn=$(echo "$hba_line" | awk '{print $5}')
+        [[ -z "$wwn" ]] && continue
+        # Check whether this WWN already has a name entry
+        local existing
+        existing=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    e = d.get('wwn_names', {}).get('${wwn}', {})
+    print(e.get('name', ''))
+except: pass
+")
+        if [[ -n "$existing" ]]; then
+            [[ $VERBOSE -eq 1 ]] && info "Target ${wwn} already named '${existing}' - skipping"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if [[ $DRY_RUN -eq 1 ]]; then
+            info "[DRY-RUN] Would name ${wwn} -> ${hostname_short}:${idx} [target]"
+            named=$((named + 1))
+            continue
+        fi
+        py_json "
+import json
+d = json.load(open('${CONFIG}'))
+entry = d.setdefault('wwn_names', {}).setdefault('${wwn}', {})
+entry['name'] = '${hostname_short}'
+entry['role'] = 'target'
+entry['port'] = int('${idx}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+        ok "Named target port ${wwn} -> ${hostname_short}:${idx}"
+        named=$((named + 1))
+    done < <(detect_hbas)
+    [[ $named -eq 0 && $skipped -gt 0 ]] && info "Target ports already named - no changes made" || true
+}
+
 scst_target_path() { echo "/sys/kernel/scst_tgt/targets/qla2x00t/${1}"; }
 
 scst_enable_target() {
@@ -1048,6 +1097,11 @@ cmd_install() {
         copy_v "$0" "${QLE_ADM_HOME}/qle_adm.sh"
         [[ $DRY_RUN -eq 0 && -f "${QLE_ADM_HOME}/qle_adm.sh" ]] && chmod +x "${QLE_ADM_HOME}/qle_adm.sh"
     fi
+
+    # Name target ports using short hostname - idempotent, skips already-named ports
+    echo ""
+    info "Naming target ports..."
+    auto_name_target_ports
 
     if [[ $DRY_RUN -eq 1 ]]; then
         ok "Installation complete (dry run)"
@@ -1278,6 +1332,9 @@ cmd_sync() {
     fi
 
     if [[ $boot_mode -eq 1 ]]; then
+        # Name any target ports that don't yet have a name entry. This handles
+        # HBAs added after initial install without requiring a manual name set.
+        auto_name_target_ports
         # Load the target module. SCST starts after this service exits and
         # reads the reconstructed scst.conf naturally - no sysfs apply needed.
         if ! module_loaded "qla2xxx_scst"; then
@@ -1738,9 +1795,9 @@ except: pass
             _parts=()
             for _w in $assigned_inits; do
                 _lbl=$(wwn_label "$_w" "initiator")
-                _parts+=("${_w} (${CYN}${_lbl}${NC})")
+                _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
             done
-            assigned="assigned to: $(IFS=', '; echo "${_parts[*]}")"
+            assigned="${DIM}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size=""
@@ -1761,7 +1818,7 @@ else:
 " 2>/dev/null || echo "${size_mb_raw} MB")
             fi
         fi
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}${assigned:+  ${CYN}${assigned}${NC}}"
+        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}${assigned:+  ${assigned}}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
     [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in /etc/scst.conf${NC}" || true
