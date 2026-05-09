@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.28: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.29: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -229,7 +229,7 @@ from the install directory.
 
 | Command | Description |
 |---|---|
-| `sync [--boot] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params (the kernel autoloads the module before POSTINIT with default params; the conditional skip that was here left wrong params in place), then polls for `qla2x00t` registration and applies config via scstadmin non-disruptively. `--apply` rebuilds scst.conf then applies it to the live SCST sysfs tree via scstadmin - no restart, no session drops. Use when `list-extents` shows `[no sysfs]`. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
+| `sync [--boot] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params and writes a boot marker to the log. Does not poll or apply via scstadmin - the systemd ExecStartPre drop-in (written by `--system`) ensures SCST starts only after this completes, so `qla2x00t` registers correctly. `--apply` rebuilds scst.conf then applies it to the live SCST sysfs tree via scstadmin - no restart, no session drops. Use when `list-extents` shows `[no sysfs]`. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config and systemd drop-in in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -296,6 +296,21 @@ authoritative source for param drift detection.
 | `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-assignments` | Per-initiator LUN mappings |
 | `list-all` | All five list commands in sequence |
+
+### Log management
+
+Boot sessions are delimited in the log by `=== BOOT sync started ===` marker lines written at the start of each `sync --boot` run. Session-aware commands (`boot`, `last`, `trim`) require at least one boot with v2.29 or later.
+
+| Command | Description |
+|---|---|
+| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
+| `log boot` | Current boot session (from last marker to end of log) |
+| `log last [N]` | Previous N boot sessions for comparison (default 1) |
+| `log clear` | Truncate log file - confirms before clearing |
+| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
+| `log grep <pattern>` | Filter log by pattern |
+| `log path` | Print log file path |
+| `log status` | Size, line count, session count, oldest/newest entry |
 
 ### Port management
 

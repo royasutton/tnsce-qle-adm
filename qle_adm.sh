@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.28"
+VERSION="2.29"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1389,6 +1389,9 @@ cmd_sync() {
     fi
 
     if [[ $boot_mode -eq 1 ]]; then
+        # Boot marker - written first so log sessions are clearly delimited.
+        # Used by 'log boot', 'log last', and 'log trim' to identify session boundaries.
+        log "=== BOOT sync started v${VERSION} ==="
         # Name any target ports that don't yet have a name entry. This handles
         # HBAs added after initial install without requiring a manual name set.
         auto_name_target_ports
@@ -1396,15 +1399,22 @@ cmd_sync() {
         # qla2xxx_scst via udev before POSTINIT runs, with default params.
         # The conditional skip that was here left wrong params in place for
         # the entire session. load_target_module calls modprobe -r first so
-        # this is safe. SCST starts after POSTINIT exits and reads the
-        # reconstructed scst.conf naturally.
+        # this is safe.
         load_target_module "$isp_type"
         sleep 5
-        # Poll for qla2x00t registration then apply scst.conf non-disruptively.
-        # SCST starts after POSTINIT exits; qla2x00t registers as the driver
-        # initializes. We wait up to 60s for registration then apply config
-        # via scstadmin so LUN mappings are active without a service restart.
-        scstadmin_apply 60 || true
+        # qla2xxx_scst registers with SCST at module load time. Since SCST
+        # starts after POSTINIT exits, the module loads into a window where
+        # SCST is not yet running and the registration is lost. scstadmin_apply
+        # cannot succeed here - qla2x00t will not appear in sysfs until the
+        # module is reloaded while SCST is already running.
+        # The systemd ExecStartPre drop-in (written by sync --system) ensures
+        # SCST starts only after this script completes, which resolves the
+        # ordering problem cleanly. Without the drop-in, run 'sync --restart'
+        # after boot to reload the module while SCST is running.
+        if [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            info "qla2x00t not yet registered - SCST will register it on startup"
+            info "If 'status' shows a gap after boot, run: sync --restart"
+        fi
         ok "Boot sync complete - SCST FC targets initialized from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then
@@ -1616,6 +1626,162 @@ cmd_module() {
             divider
             ;;
         *) err "Unknown subcommand: ${subcmd}  (load|unload|reload|status)" ;;
+    esac
+}
+
+# ─── Log management ───────────────────────────────────────────────────────────
+# Boot sessions are delimited by "=== BOOT sync started" marker lines.
+# Commands that operate on sessions (boot, last, trim) require at least one
+# boot with the marker present to work correctly.
+
+_log_boot_offsets() {
+    # Print byte offsets of each boot marker line in the log.
+    grep -ob "=== BOOT sync started" "$LOG" 2>/dev/null | cut -d: -f1 || true
+}
+
+_log_session_count() {
+    grep -c "=== BOOT sync started" "$LOG" 2>/dev/null || echo 0
+}
+
+_log_extract_session() {
+    # Extract session N (1-based from end) from the log.
+    # Session 1 = most recent, 2 = previous, etc.
+    local n="${1:-1}"
+    local offsets; mapfile -t offsets < <(_log_boot_offsets)
+    local total="${#offsets[@]}"
+    if [[ $total -eq 0 ]]; then
+        warn "No boot markers found in log - boot with v${VERSION} first to enable session commands"
+        return 1
+    fi
+    local idx=$(( total - n ))
+    if [[ $idx -lt 0 ]]; then
+        err "Only ${total} boot session(s) recorded, cannot show session ${n}"
+        return 1
+    fi
+    local start="${offsets[$idx]}"
+    local end=""
+    if [[ $(( idx + 1 )) -lt $total ]]; then
+        end="${offsets[$(( idx + 1 ))]}"
+    fi
+    if [[ -n "$end" ]]; then
+        dd if="$LOG" bs=1 skip="$start" count=$(( end - start )) 2>/dev/null
+    else
+        dd if="$LOG" bs=1 skip="$start" 2>/dev/null
+    fi
+}
+
+cmd_log() {
+    local subcmd="${1:-show}"; shift || true
+
+    case "$subcmd" in
+        show)
+            # Show the full log, paged. --tail N shows last N lines.
+            local tail_n=""
+            [[ "${1:-}" == "--tail" ]] && tail_n="${2:-50}"
+            if [[ ! -f "$LOG" ]]; then
+                info "Log file not found: ${LOG}"
+                return 0
+            fi
+            if [[ -n "$tail_n" ]]; then
+                tail -n "$tail_n" "$LOG"
+            else
+                less +G "$LOG" 2>/dev/null || cat "$LOG"
+            fi
+            ;;
+        boot)
+            # Show the current (most recent) boot session.
+            if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
+            hdr "Current boot session"
+            _log_extract_session 1 || return 1
+            divider
+            ;;
+        last)
+            # Show the previous N boot sessions. Default 1 (the session before current).
+            local n="${1:-1}"
+            if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
+            local i=1
+            while [[ $i -le $n ]]; do
+                local label; [[ $i -eq 1 ]] && label="Previous boot session" || label="Boot session -${i}"
+                hdr "$label"
+                _log_extract_session $(( i + 1 )) || break
+                divider
+                i=$(( i + 1 ))
+            done
+            ;;
+        clear)
+            if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
+            local lines; lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+            warn "This will permanently delete ${lines} lines from ${LOG}"
+            confirm_or_abort "Clear log?"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                : > "$LOG"
+                ok "Log cleared: ${LOG}"
+            else
+                info "[DRY-RUN] would truncate ${LOG}"
+            fi
+            ;;
+        trim)
+            # Keep the last N boot sessions, discard older entries. Default 10.
+            local keep="${1:-10}"
+            if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
+            local total; total=$(_log_session_count)
+            if [[ $total -eq 0 ]]; then
+                warn "No boot markers found - nothing to trim"
+                return 0
+            fi
+            if [[ $total -le $keep ]]; then
+                ok "Only ${total} session(s) recorded - nothing to trim (keeping ${keep})"
+                return 0
+            fi
+            local discard=$(( total - keep ))
+            warn "Will discard ${discard} oldest boot session(s), keeping ${keep}"
+            confirm_or_abort "Trim log?"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                # Find the byte offset of the (discard+1)th marker - keep from there
+                local offsets; mapfile -t offsets < <(_log_boot_offsets)
+                local keep_from="${offsets[$discard]}"
+                local tmpfile; tmpfile=$(mktemp)
+                dd if="$LOG" bs=1 skip="$keep_from" 2>/dev/null > "$tmpfile"
+                mv "$tmpfile" "$LOG"
+                ok "Log trimmed: kept ${keep} most recent boot session(s)"
+            else
+                info "[DRY-RUN] would trim ${discard} oldest session(s) from ${LOG}"
+            fi
+            ;;
+        grep)
+            local pattern="${1:-}"
+            [[ -z "$pattern" ]] && { err "Usage: log grep <pattern>"; return 1; }
+            if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
+            grep --color=auto "$pattern" "$LOG" || true
+            ;;
+        path)
+            echo "$LOG"
+            ;;
+        status)
+            hdr "Log Status"
+            if [[ ! -f "$LOG" ]]; then
+                info "Log file not found: ${LOG}"
+                divider; return 0
+            fi
+            local lines; lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+            local size; size=$(du -sh "$LOG" 2>/dev/null | cut -f1 || echo "unknown")
+            local sessions; sessions=$(_log_session_count)
+            local oldest newest
+            oldest=$(head -1 "$LOG" 2>/dev/null | grep -oP '^\[\K[^\]]+' || echo "unknown")
+            newest=$(tail -1 "$LOG" 2>/dev/null | grep -oP '^\[\K[^\]]+' || echo "unknown")
+            echo -e "  Path     : ${LOG}"
+            echo -e "  Size     : ${size}"
+            echo -e "  Lines    : ${lines}"
+            echo -e "  Sessions : ${sessions} boot session(s) recorded"
+            echo -e "  Oldest   : ${oldest}"
+            echo -e "  Newest   : ${newest}"
+            divider
+            ;;
+        *)
+            err "Unknown log subcommand: ${subcmd}"
+            err "Usage: log show [--tail N] | boot | last [N] | clear | trim [N] | grep <pattern> | path | status"
+            return 1
+            ;;
     esac
 }
 
@@ -2830,6 +2996,9 @@ Status       : status
                list-assignments
                list-all
 
+Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
+                    grep <pattern> | path | status
+
 Port         : port  enable | disable  <wwn> | --port N
 
 LUN Mapping  : open     <extent> | --ext N
@@ -2865,9 +3034,11 @@ ${CYN}Deployment:${NC}
 ${CYN}Operation:${NC}
   sync [--boot] [--restart] [--system]
                                  Rebuild scst.conf from config.json.
-                                 --boot   : also loads qla2xxx_scst; used by boot service.
-                                            Polls for qla2x00t registration then applies
-                                            config non-disruptively via scstadmin.
+                                 --boot   : also loads qla2xxx_scst with configured params;
+                                            used by the POSTINIT boot service. Writes a boot
+                                            marker to the log. Does not poll or apply via
+                                            scstadmin - the systemd drop-in (written by
+                                            --system) ensures SCST starts after this completes.
                                  --apply  : rebuild scst.conf then apply to live SCST via
                                             scstadmin. Non-disruptive - no restart, no
                                             session drops. Use when extents show [no sysfs]
@@ -2875,9 +3046,9 @@ ${CYN}Operation:${NC}
                                  --restart: rebuilds scst.conf then restarts scst.service.
                                             Warns and confirms before restart - all active
                                             sessions will be dropped.
-                                 --system : also write/restore /etc files (modprobe config
-                                            and boot service). Implied by --boot. Use
-                                            explicitly after a BE change or upgrade when
+                                 --system : also write/restore /etc files (modprobe config,
+                                            boot service, systemd drop-in). Implied by --boot.
+                                            Use explicitly after a BE change or upgrade when
                                             not running from the boot service.
                                  (no flag): scst.conf only - live sysfs untouched, no
                                             /etc writes. Safe at any time.
@@ -2904,6 +3075,16 @@ ${CYN}Status:${NC}
   list-initiators                Connected initiators with IO stats; seen history always shown
   list-assignments               Per-initiator LUN mappings
   list-all                       Runs all five list commands in sequence
+
+${CYN}Log Management:${NC}
+  log show [--tail N]            Full log (paged); --tail N shows last N lines
+  log boot                       Current boot session (from last boot marker)
+  log last [N]                   Previous N boot sessions (default 1)
+  log clear                      Truncate log file (confirms before clearing)
+  log trim [N]                   Keep last N boot sessions, discard older (default 10)
+  log grep <pattern>             Filter log by pattern
+  log path                       Print log file path
+  log status                     Size, line count, session count, oldest/newest entry
 
 ${CYN}Port Management:${NC}
   port enable  <wwn>|--port N    Write enabled=1 to SCST sysfs, save to config
@@ -3189,6 +3370,7 @@ main() {
         clear)           cmd_clear "${rest[@]}" ;;
         status)          cmd_status ;;
         stats)           cmd_stats "${rest[@]}" ;;
+        log)             cmd_log "${rest[@]}" ;;
         list-hba)        cmd_list_hba ;;
         list-ports)      cmd_list_ports ;;
         list-extents)    cmd_list_extents ;;
