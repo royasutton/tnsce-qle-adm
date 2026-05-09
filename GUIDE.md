@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.30: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.31: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -337,8 +337,8 @@ All mapping commands write to both sysfs (immediate) and config.json
 ### Firmware
 
 ```bash
-./qle_adm.sh fw save-dist                      # capture TrueNAS dist firmware
-./qle_adm.sh fw save [--port N]                # read optrom → versioned store
+./qle_adm.sh fw save-os                        # capture OS dist firmware
+./qle_adm.sh fw save-hba [--port N]            # read optrom → versioned store
 ./qle_adm.sh fw list                           # list stored versions
 ./qle_adm.sh fw add ISP2532 <file>             # import external file
 ./qle_adm.sh fw remove ISP2532 <version>       # remove a version
@@ -473,20 +473,23 @@ firmware/
   ISP2532/
     8.07.00/
       ql2500_fw.bin
-      dist_TrueNAS-SCALE-25.04.0    ← dist marker
+      os_TrueNAS-SCALE-25.04.0    ← OS marker
     8.08.207/
       ql2500_fw.bin
-    selected                         ← active selection
+    8.08.207-hba/                 ← collision: same version, different content
+      ql2500_fw.bin
 ```
+
+When two sources produce the same version string but differ in content (SHA256 mismatch), the second is stored with a `-<source>` suffix (`-hba`, `-os`, `-imported`) to preserve both. If the SHA256 matches, the store operation is a no-op.
 
 ### Workflow
 
 ```bash
-# First: capture TrueNAS dist firmware before making any changes
-./qle_adm.sh fw save-dist
+# First: capture OS dist firmware before making any changes (one-time per OS version)
+./qle_adm.sh fw save-os
 
 # Save optrom firmware from HBA
-./qle_adm.sh fw save
+./qle_adm.sh fw save-hba
 
 # See all stored versions
 ./qle_adm.sh fw list
@@ -506,9 +509,9 @@ firmware/
 | Command | Description |
 |---|---|
 | `fw list` | All stored versions per ISP type with selection marker |
-| `fw save-dist [--port N]` | Capture TrueNAS dist firmware with version marker |
-| `fw save [--port N]` | Read HBA optrom via sysfs into versioned store |
-| `fw add <ISP> <file>` | Import external firmware file into versioned store |
+| `fw save-os [--port N]` | Capture OS dist firmware with `os_<TrueNAS-version>` marker. SHA256 checked. |
+| `fw save-hba [--port N]` | Read HBA optrom via sysfs into versioned store. SHA256 checked. |
+| `fw add <ISP> <file>` | Import external firmware file. SHA256 checked. |
 | `fw remove <ISP> <version>` | Remove a specific version (not if currently selected) |
 | `fw use <version\|hba\|dist> [--port N]` | Set active firmware source |
 | `fw show [--port N]` | Per-port detail: running, optrom, stored, selection |

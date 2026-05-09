@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.30"
+VERSION="2.31"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -938,12 +938,55 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 }
 
 # fw_dist_marker <isp_type> <version_dir>
-# Returns the dist marker filename if one exists in the version dir, else empty.
+# Returns the os marker filename if one exists in the version dir, else empty.
 fw_dist_marker() {
-    find "${1}/${2}/" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1 || true
+    find "${1}/${2}/" -maxdepth 1 -name "os_*" -printf "%f\n" 2>/dev/null | head -1 || true
 }
 
-# inject_firmware <isp_type>
+# fw_store_versioned <isp_type> <src_file> <base_ver> <source_tag>
+# Stores a firmware file in the versioned directory structure.
+# <source_tag> is one of: os, hba, imported — used for disambiguation on collision.
+# If the version directory already exists:
+#   - SHA256 match: no-op, prints ok message
+#   - SHA256 mismatch: stores in <base_ver>-<source_tag>/ directory
+# Returns the final version directory name (for marker placement by caller).
+fw_store_versioned() {
+    local isp_type="$1" src_file="$2" base_ver="$3" source_tag="$4"
+    local fw_file="${ISP_FW_FILE[$isp_type]:-}"
+    local dest_ver="$base_ver"
+    local dest_dir="${FIRMWARE_DIR}/${isp_type}/${dest_ver}"
+    local dest_file="${dest_dir}/${fw_file}"
+
+    if [[ -d "$dest_dir" && -f "$dest_file" ]]; then
+        # Version directory already exists - compare SHA256
+        local sha_new sha_existing
+        sha_new=$(sha256sum "$src_file" 2>/dev/null | awk '{print $1}')
+        sha_existing=$(sha256sum "$dest_file" 2>/dev/null | awk '{print $1}')
+        if [[ "$sha_new" == "$sha_existing" ]]; then
+            ok "Version ${base_ver} already stored - content identical (SHA256 match), skipping"
+            echo "$dest_ver"
+            return 0
+        else
+            warn "Version ${base_ver} already stored but content differs (SHA256 mismatch)"
+            warn "Existing: ${dest_file}"
+            warn "Storing new file as ${base_ver}-${source_tag} to preserve both"
+            dest_ver="${base_ver}-${source_tag}"
+            dest_dir="${FIRMWARE_DIR}/${isp_type}/${dest_ver}"
+            dest_file="${dest_dir}/${fw_file}"
+        fi
+    fi
+
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mkdir -p "$dest_dir"
+        cp "$src_file" "$dest_file"
+        ok "Stored ${isp_type} firmware v${base_ver} ${SYM_INFO} ${dest_file}"
+    else
+        info "[DRY-RUN] mkdir -p ${dest_dir} && cp ${src_file} ${dest_file}"
+    fi
+    echo "$dest_ver"
+}
+
+
 # Copies the selected firmware version into /usr/lib/firmware/ and returns
 # the ql2xfwloadbin value to use (0=hba, 2=filesystem).
 # Modifies the caller's $params variable is NOT done here - caller must
@@ -966,14 +1009,14 @@ inject_firmware() {
         local dist_ver=""
         for vdir in "${FIRMWARE_DIR}/${isp_type}/"/*/; do
             [[ -d "$vdir" ]] || continue
-            local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" 2>/dev/null | head -1)
+            local marker; marker=$(find "$vdir" -maxdepth 1 -name "os_*" 2>/dev/null | head -1)
             if [[ -n "$marker" ]]; then
                 dist_ver=$(basename "$vdir")
                 break
             fi
         done
         if [[ -z "$dist_ver" ]]; then
-            warn "No dist firmware saved for ${isp_type} - using HBA flash (run 'fw save-dist' to capture)"
+            warn "No OS dist firmware saved for ${isp_type} - using HBA flash (run 'fw save-os' to capture)"
             echo "0"
             return
         fi
@@ -2738,7 +2781,7 @@ cmd_fw() {
                     local vfile="${vdir}${fw_file}"
                     [[ ! -f "$vfile" ]] && continue
                     local sz; sz=$(du -h "$vfile" 2>/dev/null | awk '{print $1}')
-                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "os_*" -printf "%f\n" 2>/dev/null | head -1)
                     local flags=""
                     [[ -n "$marker" ]] && flags+=" ${DIM}${marker}${NC}"
                     [[ "$selected" == "$ver" ]] && flags+=" ${GRN}[selected]${NC}"
@@ -2750,47 +2793,38 @@ cmd_fw() {
                 echo -e "    ${DIM}dist  use dist-marked version (default if stored)${NC}"
                 any=$((any + 1))
             done
-            [[ $any -eq 0 ]] && echo -e "  ${DIM}(no firmware stored - run 'fw save' or 'fw save-dist')${NC}"
+            [[ $any -eq 0 ]] && echo -e "  ${DIM}(no firmware stored - run 'fw save-hba' or 'fw save-os')${NC}"
             divider
             ;;
-        save-dist)
-            # Capture the TrueNAS distribution firmware from /usr/lib/firmware
+        save-os)
+            # Capture the OS distribution firmware from /usr/lib/firmware
             local port_idx=""
             [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
-            hdr "Save Distribution Firmware"
+            hdr "Save OS Distribution Firmware"
             local isp_type
             read -r _ _ _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
             local fw_file="${ISP_FW_FILE[$isp_type]:-}"
             [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}"; return 1; }
             local src="/usr/lib/firmware/${fw_file}"
-            [[ ! -f "$src" ]] && { err "Dist firmware not found: ${src}"; return 1; }
+            [[ ! -f "$src" ]] && { err "OS firmware not found: ${src}"; return 1; }
             local ver; ver=$(fw_extract_version "$src")
-            local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
-            local dest="${dest_dir}/${fw_file}"
-            if [[ -d "$dest_dir" && "${1:-}" != "--force" ]]; then
-                warn "Version ${ver} already stored at ${dest_dir}"
-                warn "Use --force to overwrite"
-                return 1
-            fi
             # Get TrueNAS version for marker
             local tn_ver; tn_ver=$(midclt call system.version 2>/dev/null | tr -d '"' || echo "unknown")
-            local marker="dist_${tn_ver}"
-            info "Saving dist firmware ${isp_type} v${ver} from ${src}"
+            local marker="os_${tn_ver}"
+            info "Saving OS firmware ${isp_type} v${ver} from ${src}"
             info "TrueNAS version: ${tn_ver}"
-            if [[ $DRY_RUN -eq 0 ]]; then
-                mkdir -p "$dest_dir"
-                cp "$src" "$dest"
-                touch "${dest_dir}/${marker}"
-                ok "Saved ${isp_type} dist firmware v${ver} ${SYM_INFO} ${dest}"
-                ok "Marker: ${dest_dir}/${marker}"
-            else
-                info "[DRY-RUN] mkdir -p ${dest_dir}"
-                info "[DRY-RUN] cp ${src} ${dest}"
-                info "[DRY-RUN] touch ${dest_dir}/${marker}"
+            local stored_ver; stored_ver=$(fw_store_versioned "$isp_type" "$src" "$ver" "os")
+            if [[ $DRY_RUN -eq 0 && -d "${FIRMWARE_DIR}/${isp_type}/${stored_ver}" ]]; then
+                # Place marker only if not already present
+                local existing_marker; existing_marker=$(find "${FIRMWARE_DIR}/${isp_type}/${stored_ver}/" -maxdepth 1 -name "os_*" 2>/dev/null | head -1)
+                if [[ -z "$existing_marker" ]]; then
+                    touch "${FIRMWARE_DIR}/${isp_type}/${stored_ver}/${marker}"
+                    ok "Marker: ${FIRMWARE_DIR}/${isp_type}/${stored_ver}/${marker}"
+                fi
             fi
             divider
             ;;
-        save)
+        save-hba)
             # Read firmware from HBA optrom via sysfs
             local port_idx=""
             [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
@@ -2812,11 +2846,8 @@ cmd_fw() {
                 local sz; sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
                 [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty - driver may not support optrom extraction"; rm -f "$tmp"; return 1; }
                 local ver; ver=$(fw_extract_version "$tmp")
-                local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
-                local dest="${dest_dir}/${fw_file}"
-                mkdir -p "$dest_dir"
-                mv "$tmp" "$dest"
-                ok "Saved ${isp_type} optrom firmware v${ver} ${SYM_INFO} ${dest}  (${sz} bytes)"
+                fw_store_versioned "$isp_type" "$tmp" "$ver" "hba" > /dev/null
+                rm -f "$tmp"
             else
                 info "[DRY-RUN] echo 1 > ${optrom_ctl} && dd ${optrom_path} -> versioned store && echo 0 > ${optrom_ctl}"
                 rm -f "$tmp"
@@ -2830,16 +2861,8 @@ cmd_fw() {
             local fw_file="${ISP_FW_FILE[$isp_type]:-}"
             [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}. Known: ${!ISP_FW_FILE[*]}"; return 1; }
             local ver; ver=$(fw_extract_version "$fw_path")
-            local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
-            local dest="${dest_dir}/${fw_file}"
             info "Adding ${isp_type} firmware v${ver}"
-            if [[ $DRY_RUN -eq 0 ]]; then
-                mkdir -p "$dest_dir"
-                cp "$fw_path" "$dest"
-                ok "Stored ${isp_type} firmware v${ver} ${SYM_INFO} ${dest}"
-            else
-                info "[DRY-RUN] mkdir -p ${dest_dir} && cp ${fw_path} ${dest}"
-            fi
+            fw_store_versioned "$isp_type" "$fw_path" "$ver" "imported" > /dev/null
             ;;
         remove)
             local isp_type="${1:-}" ver="${2:-}"
@@ -2848,7 +2871,7 @@ cmd_fw() {
             [[ ! -d "$dest_dir" ]] && { err "Version not found: ${dest_dir}"; return 1; }
             local selected; selected=$(fw_selected "$isp_type")
             [[ "$selected" == "$ver" ]] && { err "Cannot remove currently selected version '${ver}' - run 'fw use hba' first"; return 1; }
-            local marker; marker=$(find "$dest_dir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+            local marker; marker=$(find "$dest_dir" -maxdepth 1 -name "os_*" -printf "%f\n" 2>/dev/null | head -1)
             [[ -n "$marker" ]] && warn "Removing dist-marked version (${marker})"
             warn "Will remove ${dest_dir}"
             confirm_or_abort "Remove firmware version ${ver} for ${isp_type}?"
@@ -2913,7 +2936,7 @@ cmd_fw() {
                     local vfile="${vdir}${fw_file}"
                     [[ ! -f "$vfile" ]] && continue
                     local vver; vver=$(fw_extract_version "$vfile")
-                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "os_*" -printf "%f\n" 2>/dev/null | head -1)
                     local flags=""
                     [[ -n "$marker" ]] && flags+=" ${DIM}(${marker})${NC}"
                     [[ "$selected" == "$ver" ]] && flags+=" ${GRN}[selected]${NC}"
@@ -2950,7 +2973,7 @@ cmd_fw() {
             divider
             ;;
         *) err "Unknown fw subcommand: ${subcmd}"
-           err "Usage: fw list | save-dist | save | add | remove | use | show | status"
+           err "Usage: fw list | save-os | save-hba | add | remove | use | show | status"
            return 1 ;;
     esac
 }
@@ -3112,7 +3135,7 @@ LUN Mapping  : open     <extent> | --ext N
                assign   <extent> | --ext N  <wwn> | --init N  [lun]
                unassign <extent> | --ext N  <wwn> | --init N
 
-Firmware     : fw  list | save-dist | save | add | remove | use | show | status
+Firmware     : fw  list | save-os | save-hba | add | remove | use | show | status
 
 Config       : isp-params  list | set | use | del
 
@@ -3206,14 +3229,17 @@ ${CYN}LUN Mapping:${NC}
 
 ${CYN}Firmware:${NC}
   fw list                        All stored versions per ISP type with selection marker
-  fw save-dist [--port N]        Capture TrueNAS dist firmware from /usr/lib/firmware
-                                 into versioned store with dist_<TrueNAS-version> marker
-  fw save [--port N]             Read HBA optrom via sysfs, store in versioned directory
-  fw add <ISP> <file>            Import external firmware file into versioned store
+  fw save-os [--port N]          Capture OS dist firmware from /usr/lib/firmware into
+                                 versioned store with os_<TrueNAS-version> marker.
+                                 SHA256 checked - skips if identical already stored.
+  fw save-hba [--port N]         Read HBA optrom via sysfs into versioned directory.
+                                 SHA256 checked - disambiguates as <ver>-hba on mismatch.
+  fw add <ISP> <file>            Import external firmware file. SHA256 checked -
+                                 disambiguates as <ver>-imported on mismatch.
   fw remove <ISP> <version>      Remove a specific stored version (not if selected)
   fw use <version|hba|dist> [--port N]
                                  Set active firmware source in config.json.
-                                 hba=HBA flash (default), dist=dist-marked version,
+                                 hba=HBA flash (default), dist=os-marked version,
                                  or a specific version string. Takes effect on next
                                  boot or 'sync --system'.
   fw show [--port N]             Per-port detail: running, optrom, stored versions,
@@ -3356,11 +3382,11 @@ EX
     hdr "Firmware management"
     cat << 'EX'
 
-  # Capture TrueNAS dist firmware before making any changes (one-time)
-  ./qle_adm.sh fw save-dist
+  # Capture OS dist firmware before making any changes (one-time per OS version)
+  ./qle_adm.sh fw save-os
 
   # Save optrom firmware from HBA to versioned store
-  ./qle_adm.sh fw save
+  ./qle_adm.sh fw save-hba
 
   # See all stored versions and current selection
   ./qle_adm.sh fw list
