@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.27"
+VERSION="2.28"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1112,6 +1112,10 @@ cmd_install() {
     info "Run 'qle_adm.sh status' to check state"
     info "Run 'qle_adm.sh list-extents' to see available devices"
     info "Run 'qle_adm.sh list-ports' to see FC ports"
+    echo ""
+    echo -e "  ${CYN}Add to your shell startup script (e.g. ~/.bashrc or ~/.zshrc):${NC}"
+    echo -e "  ${WHT}export QLE_ADM_HOME=${QLE_ADM_HOME}${NC}"
+    echo -e "  ${WHT}PATH=\"\${PATH}:\${QLE_ADM_HOME}\"${NC}"
 
     # Read back and display the registered POSTINIT entry from middleware
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -1855,25 +1859,59 @@ cmd_list_extents() {
             && status="${GRN}[open]${NC}" \
             || status="${DIM}[assigned]${NC}"
 
-        # Live sysfs status: each lun directory under qla2x00t ini_groups
-        # contains a 'device' symlink pointing to
-        # ../../../../../../../devices/<extent-name>. Read the symlink and
-        # compare the final path component to the extent name.
-        # [live] = mapping present in sysfs. [no sysfs] = configured but
-        # not applied - run 'sync --apply'.
+        # Live sysfs status - four states:
+        #   [no sysfs]  - not applied to running SCST, run 'sync --apply'
+        #   [mapped]    - LUN mapping in sysfs ini_group, no initiator session
+        #   [connected] - session present on target, LUN visible, no I/O yet
+        #   [active]    - session present, I/O has been issued
+        #
+        # Detection: each ini_group lun dir contains a 'device' symlink →
+        # ../../../../../../../devices/<extent-name>. Read it to confirm
+        # the extent is mapped. Then check for a session on the same target
+        # for the same initiator group. If found, check session I/O counters.
+        # Per-lun active_commands is available under session/lun<N>/.
         local lun_found=0
+        local matched_target="" matched_lun_n="" matched_init_group=""
         if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
             for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/[0-9]*/; do
                 [[ -L "${lun_dir}device" ]] || continue
                 local dev_target; dev_target=$(readlink -f "${lun_dir}device" 2>/dev/null || true)
                 if [[ "$(basename "$dev_target")" == "$ext" ]]; then
-                    lun_found=1; break
+                    lun_found=1
+                    # Extract target WWN, ini_group WWN, and lun number from path
+                    # Path: .../qla2x00t/<target>/ini_groups/<init_group>/luns/<N>/
+                    matched_target=$(echo "$lun_dir" | grep -oP '(?<=qla2x00t/)[^/]+')
+                    matched_init_group=$(echo "$lun_dir" | grep -oP '(?<=ini_groups/)[^/]+')
+                    matched_lun_n=$(basename "${lun_dir%/}")
+                    break
                 fi
             done
         fi
-        [[ $lun_found -eq 1 ]] \
-            && live_status="${GRN}[live]${NC}" \
-            || live_status="${YLW}[no sysfs]${NC}"
+
+        if [[ $lun_found -eq 0 ]]; then
+            live_status="${YLW}[no sysfs]${NC}"
+        else
+            # Check for a session on the matched target for the matched initiator
+            local sess_path="/sys/kernel/scst_tgt/targets/qla2x00t/${matched_target}/sessions/${matched_init_group}"
+            if [[ ! -d "$sess_path" ]]; then
+                live_status="${CYN}[mapped]${NC}"
+            else
+                # Session exists - check I/O counters at session level
+                local rc wc rk wk ac
+                rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
+                wc=$(hex_to_dec "$(sysfs_read "${sess_path}/write_cmd_count" 2>/dev/null || echo 0)")
+                rk=$(hex_to_dec "$(sysfs_read "${sess_path}/read_io_count_kb"  2>/dev/null || echo 0)")
+                wk=$(hex_to_dec "$(sysfs_read "${sess_path}/write_io_count_kb" 2>/dev/null || echo 0)")
+                # Per-lun active_commands (commands in flight right now)
+                ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
+                local total_io=$(( rc + wc ))
+                if [[ $total_io -eq 0 ]]; then
+                    live_status="${GRN}[connected]${NC}"
+                else
+                    live_status="${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                fi
+            fi
+        fi
 
         assigned=""
         assigned_inits=""
@@ -2763,7 +2801,7 @@ usage() {
 Deployment   : install
                uninstall
 
-Operation    : sync [--boot] [--restart] [--system]
+Operation    : sync [--boot] [--apply] [--restart] [--system]
                module  load | unload | reload | status
                teardown
                clear  seen | ports | mappings | names | all
@@ -2847,7 +2885,7 @@ ${CYN}Status:${NC}
   list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN
   list-ports                     FC ports with managed/unmanaged state and index [N]
   list-extents                   SCST extents with size, config state [open|assigned],
-                                 and live sysfs state [live|no sysfs], index [N]
+                                 and live sysfs state [no sysfs|mapped|connected|active]
   list-initiators                Connected initiators with IO stats; seen history always shown
   list-assignments               Per-initiator LUN mappings
   list-all                       Runs all five list commands in sequence

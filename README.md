@@ -106,29 +106,34 @@ ready to make this configuration persistent across reboots, see
 # 1. Install to a persistent dataset
 QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 
-# 2. Inject FC target block into scst.conf before loading the module
+# 2. Add to your shell startup script (~/.bashrc or ~/.zshrc) so
+#    qle_adm.sh is available by name from any directory
+export QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm
+PATH="${PATH}:${QLE_ADM_HOME}"
+
+# 3. Inject FC target block into scst.conf before loading the module
 ./qle_adm.sh sync
 
-# 3. Load the module - SCST reads the FC target block on module registration
+# 4. Load the module - SCST reads the FC target block on module registration
 ./qle_adm.sh module load
 
-# 4. Verify - confirm no gaps before proceeding
+# 5. Verify - confirm no gaps before proceeding
 ./qle_adm.sh status
 
-# 5. Verify the HBA is detected and identify the P2P port index
+# 6. Verify the HBA is detected and identify the P2P port index
 ./qle_adm.sh list-hba
 ./qle_adm.sh list-ports
 
-# 6. Enable the P2P target port (use index from list-ports)
+# 7. Enable the P2P target port (use index from list-ports)
 ./qle_adm.sh port enable --port 1
 
-# 7a. Expose a ZFS volume to all initiators
+# 8a. Expose a ZFS volume to all initiators
 ./qle_adm.sh open --ext 0
 
-# 7b. Or assign to a specific initiator only
+# 8b. Or assign to a specific initiator only
 ./qle_adm.sh assign --ext 0 --init 0
 
-# 8. Verify
+# 9. Verify
 ./qle_adm.sh status
 ```
 

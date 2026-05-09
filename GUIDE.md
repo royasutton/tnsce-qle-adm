@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.27: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.28: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -155,6 +155,12 @@ chmod +x ${QLE_ADM_HOME}/qle_adm.sh
 # Run install - registers POSTINIT boot entry and writes modprobe config
 ${QLE_ADM_HOME}/qle_adm.sh --yes install
 
+# Add to your shell startup script (~/.bashrc or ~/.zshrc) so qle_adm.sh
+# is available by name from any directory on this and future sessions.
+# The install command prints these lines for you to copy.
+export QLE_ADM_HOME=/mnt/${POOL}/admin/qle_adm
+PATH="${PATH}:${QLE_ADM_HOME}"
+
 # Inject FC target block into scst.conf before loading the module
 ${QLE_ADM_HOME}/qle_adm.sh sync
 
@@ -195,8 +201,10 @@ all BE changes - no reinstall is needed.
 
 ## Command Reference
 
-All commands are run as `./qle_adm.sh <command>` from the install directory,
-or by full path `${QLE_ADM_HOME}/qle_adm.sh <command>`.
+All commands are run as `qle_adm.sh <command>` once `QLE_ADM_HOME` is on
+your `PATH` (set during install). Alternatively use the full path
+`${QLE_ADM_HOME}/qle_adm.sh <command>`, or `./qle_adm.sh <command>`
+from the install directory.
 
 ### Global options
 
@@ -284,7 +292,7 @@ authoritative source for param drift detection.
 | `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `stats [--watch] [--wide]` | IO counters and link error stats |
 | `list-ports` | FC ports with index, state, topology, managed status |
-| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[live]`/`[no sysfs]`). `[no sysfs]` = configured but not active - run `sync --apply` |
+| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-assignments` | Per-initiator LUN mappings |
 | `list-all` | All five list commands in sequence |
