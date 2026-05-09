@@ -12,13 +12,12 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.29"
+VERSION="2.30"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
 LOG="${QLE_ADM_HOME}/qle_adm.log"
-FLASH_TOOL="qlflash"   # override if tool has different name or path
 
 USE_COLOR=1    # 0 = no ANSI color codes in output
 USE_UNICODE=1  # 0 = ASCII fallback for symbols (─ ● ✓ ⚠ ✗ →)
@@ -899,34 +898,106 @@ scst_record_sessions() {
 }
 
 # ─── Firmware helpers ─────────────────────────────────────────────────────────
-firmware_overlay_active() { mount | grep -q "on /usr/lib/firmware"; }
 
-setup_firmware_overlay() {
+# fw_version_dir <isp_type> <version>
+# Returns the path to a versioned firmware directory.
+fw_version_dir() { echo "${FIRMWARE_DIR}/${1}/${2}"; }
+
+# fw_version_file <isp_type> <version>
+# Returns the path to the firmware binary in a versioned directory.
+fw_version_file() { echo "${FIRMWARE_DIR}/${1}/${2}/${ISP_FW_FILE[$1]:-}"; }
+
+# fw_extract_version <file>
+# Extracts the version string from a firmware binary.
+fw_extract_version() {
+    strings "$1" 2>/dev/null | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown"
+}
+
+# fw_selected <isp_type>
+# Returns the selected firmware source for an ISP type from config.json.
+# Default is "hba" if not set.
+fw_selected() {
+    py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('firmware', {}).get('${1}', {}).get('selected', 'hba'))
+except: print('hba')
+"
+}
+
+# fw_set_selected <isp_type> <value>
+# Sets the selected firmware source in config.json.
+fw_set_selected() {
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d.setdefault('firmware', {}).setdefault('${1}', {})['selected'] = '${2}'
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+}
+
+# fw_dist_marker <isp_type> <version_dir>
+# Returns the dist marker filename if one exists in the version dir, else empty.
+fw_dist_marker() {
+    find "${1}/${2}/" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1 || true
+}
+
+# inject_firmware <isp_type>
+# Copies the selected firmware version into /usr/lib/firmware/ and returns
+# the ql2xfwloadbin value to use (0=hba, 2=filesystem).
+# Modifies the caller's $params variable is NOT done here - caller must
+# strip and set ql2xfwloadbin based on return value.
+inject_firmware() {
     local isp_type="$1"
     local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-    local stored="${FIRMWARE_DIR}/${isp_type}/${fw_file}"
-    [[ -z "$fw_file" || ! -f "$stored" ]] && return 0
-    local ver; ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
-    info "Firmware overlay: ${isp_type} ${fw_file} version ${ver}"
-    if [[ $DRY_RUN -eq 0 ]]; then
-        mkdir -pv /run/qle_adm_firmware
-        cp -v "$stored" "/run/qle_adm_firmware/${fw_file}"
-        if ! mount | grep -q "on /usr/lib/firmware"; then
-            mount --bind /run/qle_adm_firmware /usr/lib/firmware
-        else
-            cp -v "$stored" "/usr/lib/firmware/${fw_file}"
-        fi
-        echo "/run/qle_adm_firmware" > /sys/module/firmware_class/parameters/path 2>/dev/null || true
-    else
-        info "[DRY-RUN] would bind-mount ${stored} over /usr/lib/firmware/${fw_file}"
+    [[ -z "$fw_file" ]] && { echo "0"; return; }
+
+    local selected; selected=$(fw_selected "$isp_type")
+
+    if [[ "$selected" == "hba" ]]; then
+        echo "0"
+        return
     fi
+
+    local src_file=""
+    if [[ "$selected" == "dist" ]]; then
+        # Find the dist-marked version directory
+        local dist_ver=""
+        for vdir in "${FIRMWARE_DIR}/${isp_type}/"/*/; do
+            [[ -d "$vdir" ]] || continue
+            local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" 2>/dev/null | head -1)
+            if [[ -n "$marker" ]]; then
+                dist_ver=$(basename "$vdir")
+                break
+            fi
+        done
+        if [[ -z "$dist_ver" ]]; then
+            warn "No dist firmware saved for ${isp_type} - using HBA flash (run 'fw save-dist' to capture)"
+            echo "0"
+            return
+        fi
+        src_file="${FIRMWARE_DIR}/${isp_type}/${dist_ver}/${fw_file}"
+    else
+        src_file="${FIRMWARE_DIR}/${isp_type}/${selected}/${fw_file}"
+    fi
+
+    if [[ ! -f "$src_file" ]]; then
+        warn "Selected firmware file not found: ${src_file} - using HBA flash"
+        echo "0"
+        return
+    fi
+
+    local ver; ver=$(fw_extract_version "$src_file")
+    info "Injecting firmware ${isp_type} v${ver} ${SYM_INFO} /usr/lib/firmware/${fw_file}"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        cp "$src_file" "/usr/lib/firmware/${fw_file}"
+    else
+        info "[DRY-RUN] cp ${src_file} /usr/lib/firmware/${fw_file}"
+    fi
+    echo "2"
 }
 
-teardown_firmware_overlay() {
-    if mount | grep -q "on /usr/lib/firmware"; then
-        [[ $DRY_RUN -eq 0 ]] && umount /usr/lib/firmware && info "Firmware overlay removed"
-    fi
-}
 
 # ─── Module management ────────────────────────────────────────────────────────
 module_loaded() { [[ -d "/sys/module/${1}" ]]; }
@@ -934,12 +1005,10 @@ module_loaded() { [[ -d "/sys/module/${1}" ]]; }
 load_target_module() {
     local isp_type="$1"
     local params; params=$(get_module_params "$isp_type")
-    local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-    local stored="${FIRMWARE_DIR}/${isp_type}/${fw_file:-}"
-    if [[ -n "$fw_file" && -f "$stored" ]]; then
-        params="${params} ql2xfwloadbin=2"
-        setup_firmware_overlay "$isp_type"
-    fi
+    # Strip ql2xfwloadbin from base params - inject_firmware sets the correct value.
+    params=$(echo "$params" | sed 's/ql2xfwloadbin=[^ ]*//g' | tr -s ' ' | sed 's/^ //;s/ $//')
+    local fwbin; fwbin=$(inject_firmware "$isp_type")
+    params="${params} ql2xfwloadbin=${fwbin}"
     info "Loading qla2xxx_scst: ${params}"
     if [[ $DRY_RUN -eq 0 ]]; then
         modprobe -r qla2xxx 2>/dev/null || true
@@ -1486,12 +1555,10 @@ cmd_module() {
 
     _module_load() {
         local params; params=$(get_module_params "$isp_type")
-        local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-        local stored="${FIRMWARE_DIR}/${isp_type}/${fw_file:-}"
-        if [[ -n "$fw_file" && -f "$stored" ]]; then
-            params="${params} ql2xfwloadbin=2"
-            setup_firmware_overlay "$isp_type"
-        fi
+        # Strip ql2xfwloadbin from base params - inject_firmware sets the correct value.
+        params=$(echo "$params" | sed 's/ql2xfwloadbin=[^ ]*//g' | tr -s ' ' | sed 's/^ //;s/ $//')
+        local fwbin; fwbin=$(inject_firmware "$isp_type")
+        params="${params} ql2xfwloadbin=${fwbin}"
         info "Loading qla2xxx_scst (${isp_type}): ${params}"
         if [[ $DRY_RUN -eq 0 ]]; then
             modprobe -r qla2xxx     2>/dev/null || true
@@ -1650,7 +1717,7 @@ _log_extract_session() {
     local offsets; mapfile -t offsets < <(_log_boot_offsets)
     local total="${#offsets[@]}"
     if [[ $total -eq 0 ]]; then
-        warn "No boot markers found in log - boot with v${VERSION} first to enable session commands"
+        warn "No boot markers found in log - boot with qle_adm installed first to enable session commands"
         return 1
     fi
     local idx=$(( total - n ))
@@ -1888,14 +1955,18 @@ cmd_status() {
         fi
     fi
 
-    # Firmware overlay
+    # Firmware
     echo -e "\n${CYN}Firmware:${NC}"
-    if firmware_overlay_active; then
-        ok "Custom firmware overlay active"
-        strings /usr/lib/firmware/ql2400_fw.bin 2>/dev/null | grep -i version | head -1 | awk '{print "  └─ "$0}'
-    else
-        info "Using HBA flash firmware"
-    fi
+    detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
+        local selected; selected=$(fw_selected "$isp")
+        local sel_label
+        case "$selected" in
+            hba)  sel_label="${DIM}HBA flash${NC}" ;;
+            dist) sel_label="${CYN}dist${NC}" ;;
+            *)    sel_label="${CYN}v${selected}${NC}" ;;
+        esac
+        echo -e "  [${idx}] ${host} (${isp})  running=${fw}  source=${sel_label}"
+    done
 
     # Port status
     echo -e "\n${CYN}FC Ports:${NC}"
@@ -2650,21 +2721,106 @@ cmd_fw() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list)
-            hdr "Stored Firmware"
-            local found=0
+            hdr "Firmware Store"
+            local any=0
             for isp_dir in "${FIRMWARE_DIR}"/*/; do
                 [[ -d "$isp_dir" ]] || continue
                 local isp; isp=$(basename "$isp_dir")
                 local fw_file="${ISP_FW_FILE[$isp]:-}"
-                local stored="${isp_dir}/${fw_file}"
-                if [[ -f "$stored" ]]; then
-                    local ver; ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
-                    local sz; sz=$(du -h "$stored" | awk '{print $1}')
-                    echo -e "  ${WHT}${isp}${NC}  ${fw_file}  version ${CYN}${ver}${NC}  ${sz}"
-                    found=$((found + 1))
-                fi
+                [[ -z "$fw_file" ]] && continue
+                local selected; selected=$(fw_selected "$isp")
+                echo -e "\n  ${WHT}${isp}${NC}  ${fw_file}  selected: ${CYN}${selected}${NC}"
+                # Version subdirectories
+                local found_ver=0
+                for vdir in "${isp_dir}"/*/; do
+                    [[ -d "$vdir" ]] || continue
+                    local ver; ver=$(basename "$vdir")
+                    local vfile="${vdir}${fw_file}"
+                    [[ ! -f "$vfile" ]] && continue
+                    local sz; sz=$(du -h "$vfile" 2>/dev/null | awk '{print $1}')
+                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+                    local flags=""
+                    [[ -n "$marker" ]] && flags+=" ${DIM}${marker}${NC}"
+                    [[ "$selected" == "$ver" ]] && flags+=" ${GRN}[selected]${NC}"
+                    echo -e "    ${ver}  ${sz}${flags}"
+                    found_ver=$((found_ver + 1))
+                done
+                [[ $found_ver -eq 0 ]] && echo -e "    ${DIM}(no versions stored)${NC}"
+                echo -e "    ${DIM}hba   use HBA flash firmware (ql2xfwloadbin=0)${NC}"
+                echo -e "    ${DIM}dist  use dist-marked version (default if stored)${NC}"
+                any=$((any + 1))
             done
-            [[ $found -eq 0 ]] && echo -e "  ${DIM}(none stored)${NC}" || true
+            [[ $any -eq 0 ]] && echo -e "  ${DIM}(no firmware stored - run 'fw save' or 'fw save-dist')${NC}"
+            divider
+            ;;
+        save-dist)
+            # Capture the TrueNAS distribution firmware from /usr/lib/firmware
+            local port_idx=""
+            [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
+            hdr "Save Distribution Firmware"
+            local isp_type
+            read -r _ _ _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
+            local fw_file="${ISP_FW_FILE[$isp_type]:-}"
+            [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}"; return 1; }
+            local src="/usr/lib/firmware/${fw_file}"
+            [[ ! -f "$src" ]] && { err "Dist firmware not found: ${src}"; return 1; }
+            local ver; ver=$(fw_extract_version "$src")
+            local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
+            local dest="${dest_dir}/${fw_file}"
+            if [[ -d "$dest_dir" && "${1:-}" != "--force" ]]; then
+                warn "Version ${ver} already stored at ${dest_dir}"
+                warn "Use --force to overwrite"
+                return 1
+            fi
+            # Get TrueNAS version for marker
+            local tn_ver; tn_ver=$(midclt call system.version 2>/dev/null | tr -d '"' || echo "unknown")
+            local marker="dist_${tn_ver}"
+            info "Saving dist firmware ${isp_type} v${ver} from ${src}"
+            info "TrueNAS version: ${tn_ver}"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                mkdir -p "$dest_dir"
+                cp "$src" "$dest"
+                touch "${dest_dir}/${marker}"
+                ok "Saved ${isp_type} dist firmware v${ver} ${SYM_INFO} ${dest}"
+                ok "Marker: ${dest_dir}/${marker}"
+            else
+                info "[DRY-RUN] mkdir -p ${dest_dir}"
+                info "[DRY-RUN] cp ${src} ${dest}"
+                info "[DRY-RUN] touch ${dest_dir}/${marker}"
+            fi
+            divider
+            ;;
+        save)
+            # Read firmware from HBA optrom via sysfs
+            local port_idx=""
+            [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
+            hdr "Save HBA Optrom Firmware"
+            local host isp_type
+            read -r _ host _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
+            local fw_file="${ISP_FW_FILE[$isp_type]:-}"
+            [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}"; return 1; }
+            local optrom_path="/sys/class/scsi_host/${host}/device/optrom"
+            local optrom_ctl="/sys/class/scsi_host/${host}/device/optrom_ctl"
+            [[ ! -f "$optrom_ctl" ]] && { err "optrom_ctl sysfs not found: ${optrom_ctl}"; return 1; }
+            info "Reading optrom from ${host} (${isp_type})..."
+            local tmp; tmp=$(mktemp)
+            if [[ $DRY_RUN -eq 0 ]]; then
+                echo 1 > "$optrom_ctl" 2>/dev/null || { err "Failed to enable optrom read mode"; rm -f "$tmp"; return 1; }
+                sleep 1
+                dd if="$optrom_path" of="$tmp" bs=4096 2>/dev/null
+                echo 0 > "$optrom_ctl" 2>/dev/null || true
+                local sz; sz=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+                [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty - driver may not support optrom extraction"; rm -f "$tmp"; return 1; }
+                local ver; ver=$(fw_extract_version "$tmp")
+                local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
+                local dest="${dest_dir}/${fw_file}"
+                mkdir -p "$dest_dir"
+                mv "$tmp" "$dest"
+                ok "Saved ${isp_type} optrom firmware v${ver} ${SYM_INFO} ${dest}  (${sz} bytes)"
+            else
+                info "[DRY-RUN] echo 1 > ${optrom_ctl} && dd ${optrom_path} -> versioned store && echo 0 > ${optrom_ctl}"
+                rm -f "$tmp"
+            fi
             divider
             ;;
         add)
@@ -2673,83 +2829,96 @@ cmd_fw() {
             [[ ! -f "$fw_path" ]] && { err "File not found: ${fw_path}"; return 1; }
             local fw_file="${ISP_FW_FILE[$isp_type]:-}"
             [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}. Known: ${!ISP_FW_FILE[*]}"; return 1; }
-            local ver; ver=$(strings "$fw_path" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
-            info "Adding ${isp_type} firmware version ${ver}"
-            mkdir_v "${FIRMWARE_DIR}/${isp_type}"
-            copy_v "$fw_path" "${FIRMWARE_DIR}/${isp_type}/${fw_file}"
-            ok "Stored ${isp_type} firmware ${ver} ${SYM_INFO} ${FIRMWARE_DIR}/${isp_type}/${fw_file}"
+            local ver; ver=$(fw_extract_version "$fw_path")
+            local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
+            local dest="${dest_dir}/${fw_file}"
+            info "Adding ${isp_type} firmware v${ver}"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                mkdir -p "$dest_dir"
+                cp "$fw_path" "$dest"
+                ok "Stored ${isp_type} firmware v${ver} ${SYM_INFO} ${dest}"
+            else
+                info "[DRY-RUN] mkdir -p ${dest_dir} && cp ${fw_path} ${dest}"
+            fi
             ;;
         remove)
-            local isp_type="${1:-}"
-            [[ -z "$isp_type" ]] && { err "Usage: fw remove <ISP_TYPE>"; return 1; }
-            local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-            rm_f_v "${FIRMWARE_DIR}/${isp_type}/${fw_file}"
-            ok "Removed stored firmware for ${isp_type}"
-            ;;
-        save)
-            local port_idx=""
-            [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
-            hdr "Save Card Firmware"
-            read -r _ host _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
-            local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-            [[ -z "$fw_file" ]] && { err "Unknown ISP type: ${isp_type}"; return 1; }
-            local dest="${FIRMWARE_DIR}/${isp_type}/${fw_file}"
-            local optrom_path="/sys/class/scsi_host/${host}/device/optrom"
-            local optrom_ctl="/sys/class/scsi_host/${host}/device/optrom_ctl"
-            [[ ! -f "$optrom_ctl" ]] && { err "optrom_ctl sysfs not found: ${optrom_ctl}"; return 1; }
-            info "Reading optrom from ${host} (${isp_type})..."
-            mkdir_v "${FIRMWARE_DIR}/${isp_type}"
+            local isp_type="${1:-}" ver="${2:-}"
+            [[ -z "$isp_type" || -z "$ver" ]] && { err "Usage: fw remove <ISP_TYPE> <version>"; return 1; }
+            local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
+            [[ ! -d "$dest_dir" ]] && { err "Version not found: ${dest_dir}"; return 1; }
+            local selected; selected=$(fw_selected "$isp_type")
+            [[ "$selected" == "$ver" ]] && { err "Cannot remove currently selected version '${ver}' - run 'fw use hba' first"; return 1; }
+            local marker; marker=$(find "$dest_dir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+            [[ -n "$marker" ]] && warn "Removing dist-marked version (${marker})"
+            warn "Will remove ${dest_dir}"
+            confirm_or_abort "Remove firmware version ${ver} for ${isp_type}?"
             if [[ $DRY_RUN -eq 0 ]]; then
-                # Enable optrom read mode
-                echo 1 > "$optrom_ctl" 2>/dev/null || { err "Failed to enable optrom read mode"; return 1; }
-                sleep 1
-                dd if="$optrom_path" of="$dest" bs=4096 2>/dev/null
-                # Release optrom
-                echo 0 > "$optrom_ctl" 2>/dev/null || true
-                local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-                [[ "$sz" -eq 0 ]] && { err "Optrom read returned empty - driver may not support optrom extraction on this build"; rm -f "$dest"; return 1; }
-                local ver; ver=$(strings "$dest" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
-                ok "Saved ${isp_type} optrom firmware ${ver} ${SYM_INFO} ${dest}  (${sz} bytes)"
+                rm -rf "$dest_dir"
+                ok "Removed ${isp_type} v${ver}"
             else
-                info "[DRY-RUN] would: echo 1 > ${optrom_ctl} && dd ${optrom_path} ${SYM_INFO} ${dest} && echo 0 > ${optrom_ctl}"
+                info "[DRY-RUN] rm -rf ${dest_dir}"
             fi
-            divider
+            ;;
+        use)
+            local ver="${1:-}" port_idx=""
+            [[ "${2:-}" == "--port" ]] && { port_idx="${3:-}"; shift 2 || true; }
+            [[ -z "$ver" ]] && { err "Usage: fw use <version|hba|dist> [--port N]"; return 1; }
+            local isp_type
+            read -r _ _ _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
+            [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && { err "Could not detect ISP type"; return 1; }
+            # Validate non-keyword versions exist
+            if [[ "$ver" != "hba" && "$ver" != "dist" ]]; then
+                local dest_dir="${FIRMWARE_DIR}/${isp_type}/${ver}"
+                [[ ! -d "$dest_dir" ]] && { err "Version '${ver}' not found for ${isp_type} - run 'fw list'"; return 1; }
+            fi
+            if [[ $DRY_RUN -eq 0 ]]; then
+                fw_set_selected "$isp_type" "$ver"
+                ok "Selected firmware for ${isp_type}: ${ver}"
+                info "Takes effect on next boot or 'sync --system'"
+            else
+                info "[DRY-RUN] would set firmware.${isp_type}.selected=${ver} in config.json"
+            fi
             ;;
         show)
             local port_idx=""
             [[ "${1:-}" == "--port" ]] && { port_idx="${2:-}"; shift 2 || true; }
-            hdr "Card Firmware Versions"
+            hdr "Firmware Details"
             detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
                 [[ -n "$port_idx" && "$idx" != "$port_idx" ]] && continue
                 local scsi_host="/sys/class/scsi_host/${host}"
                 local optrom_ver; optrom_ver=$(cat "${scsi_host}/optrom_fw_version" 2>/dev/null | awk '{print $1}' || echo "n/a")
-                local primary_ver; primary_ver=$(cat "${scsi_host}/optrom_gold_fw_version" 2>/dev/null | awk '{print $1}' || echo "not exposed by driver")
-                local fw_file="${ISP_FW_FILE[$isp]:-}"
-                local stored="${FIRMWARE_DIR}/${isp}/${fw_file}"
-                local stored_ver=""
-                [[ -f "$stored" ]] && stored_ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
+                local primary_ver; primary_ver=$(cat "${scsi_host}/optrom_gold_fw_version" 2>/dev/null | awk '{print $1}' || echo "not exposed")
                 local lbl; lbl=$(wwn_label "$wwn" "target")
+                local selected; selected=$(fw_selected "$isp")
                 local fwbin_val; fwbin_val=$(cat /sys/module/qla2xxx_scst/parameters/ql2xfwloadbin 2>/dev/null || \
                     cat /sys/module/qla2xxx/parameters/ql2xfwloadbin 2>/dev/null || echo "?")
                 local fwbin_label
                 case "$fwbin_val" in
-                    0) fwbin_label="primary flash" ;;
+                    0) fwbin_label="HBA flash" ;;
                     1) fwbin_label="optrom" ;;
-                    2) fwbin_label="filesystem" ;;
+                    2) fwbin_label="filesystem (/usr/lib/firmware)" ;;
                     *) fwbin_label="unknown" ;;
                 esac
                 echo -e "\n  ${WHT}[${idx}] ${host}${NC} - ${isp}  ${wwn} (${CYN}${lbl}${NC})"
                 echo -e "    Running  : ${fw}"
                 echo -e "    Primary  : ${primary_ver}"
                 echo -e "    Optrom   : ${optrom_ver}"
-                if [[ -n "$stored_ver" ]]; then
-                    local match_ind=""
-                    [[ "$stored_ver" == "$optrom_ver" ]] && match_ind=" ${GRN}${SYM_OK} matches optrom${NC}"
-                    echo -e "    Stored   : ${stored_ver}${match_ind}"
-                else
-                    echo -e "    Stored   : ${DIM}none${NC}"
-                fi
+                echo -e "    Selected : ${selected}"
                 echo -e "    Load src : ql2xfwloadbin=${fwbin_val} (${fwbin_label})"
+                echo -e "    Stored versions:"
+                local fw_file="${ISP_FW_FILE[$isp]:-}"
+                for vdir in "${FIRMWARE_DIR}/${isp}/"/*/; do
+                    [[ -d "$vdir" ]] || continue
+                    local ver; ver=$(basename "$vdir")
+                    local vfile="${vdir}${fw_file}"
+                    [[ ! -f "$vfile" ]] && continue
+                    local vver; vver=$(fw_extract_version "$vfile")
+                    local marker; marker=$(find "$vdir" -maxdepth 1 -name "dist_*" -printf "%f\n" 2>/dev/null | head -1)
+                    local flags=""
+                    [[ -n "$marker" ]] && flags+=" ${DIM}(${marker})${NC}"
+                    [[ "$selected" == "$ver" ]] && flags+=" ${GRN}[selected]${NC}"
+                    echo -e "      ${ver}  v${vver}${flags}"
+                done
             done
             divider
             ;;
@@ -2758,94 +2927,31 @@ cmd_fw() {
             detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
                 local scsi_host="/sys/class/scsi_host/${host}"
                 local optrom_ver; optrom_ver=$(cat "${scsi_host}/optrom_fw_version" 2>/dev/null | awk '{print $1}' || echo "n/a")
-                local fw_file="${ISP_FW_FILE[$isp]:-}"
-                local stored="${FIRMWARE_DIR}/${isp}/${fw_file}"
-                local stored_ver=""
-                [[ -f "$stored" ]] && stored_ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "?")
                 local lbl; lbl=$(wwn_label "$wwn" "target")
-                local sync_ind=""
-                if [[ -n "$stored_ver" ]]; then
-                    [[ "$stored_ver" == "$optrom_ver" ]] && sync_ind="${GRN}${SYM_OK}${NC}" || sync_ind="${YLW}${SYM_WARN}${NC}"
-                else
-                    sync_ind="${DIM}-${NC}"
+                local selected; selected=$(fw_selected "$isp")
+                local fw_file="${ISP_FW_FILE[$isp]:-}"
+                local stored_count; stored_count=$(find "${FIRMWARE_DIR}/${isp}/" -name "$fw_file" 2>/dev/null | wc -l || echo 0)
+                local sync_ind
+                # Check if running version matches selected stored version
+                local sel_ver=""
+                if [[ "$selected" != "hba" && "$selected" != "dist" ]]; then
+                    local sel_file="${FIRMWARE_DIR}/${isp}/${selected}/${fw_file}"
+                    [[ -f "$sel_file" ]] && sel_ver=$(fw_extract_version "$sel_file")
                 fi
-                echo -e "  ${sync_ind} ${host}  ${isp}  ${wwn} (${CYN}${lbl}${NC})  running=${fw}  optrom=${optrom_ver}  stored=${stored_ver:-none}"
+                if [[ "$selected" == "hba" ]]; then
+                    sync_ind="${DIM}-${NC}"
+                elif [[ -n "$sel_ver" && "$sel_ver" == "$fw" ]]; then
+                    sync_ind="${GRN}${SYM_OK}${NC}"
+                else
+                    sync_ind="${YLW}${SYM_WARN}${NC}"
+                fi
+                echo -e "  ${sync_ind} ${host}  ${isp}  ${wwn} (${CYN}${lbl}${NC})  running=${fw}  optrom=${optrom_ver}  selected=${selected}  stored=${stored_count} version(s)"
             done
             divider
             ;;
-        flash)
-            local slot="" port_idx="" fw_src="" do_yes=0
-            while [[ $# -gt 0 ]]; do
-                case "${1:-}" in
-                    --slot)  slot="${2:-}";     shift 2 ;;
-                    --port)  port_idx="${2:-}"; shift 2 ;;
-                    --file)  fw_src="${2:-}";   shift 2 ;;
-                    --yes)   do_yes=1;          shift ;;
-                    *)       shift ;;
-                esac
-            done
-            [[ -z "$slot" ]] && { err "Usage: fw flash --slot <primary|optrom> [--port N] [--file <path>] [--yes]"; return 1; }
-            [[ "$slot" != "primary" && "$slot" != "optrom" ]] && { err "Slot must be 'primary' or 'optrom'"; return 1; }
-
-            echo -e "\n${CYN}Preflight:${NC}"
-
-            # 1 - flash tool
-            local flash_bin; flash_bin=$(command -v "$FLASH_TOOL" 2>/dev/null || echo "")
-            if [[ -z "$flash_bin" ]]; then
-                err "Flash tool '${FLASH_TOOL}' not found in PATH"
-                err "Install it or set FLASH_TOOL= at the top of qle_adm.sh"
-                return 1
-            fi
-            ok "Flash tool: ${flash_bin}"
-
-            # 2 - detect port
-            read -r _ host _ isp_type _ <<< "$(detect_hbas | { [[ -n "$port_idx" ]] && sed -n "$((port_idx+1))p" || head -1; })"
-            ok "Target port: ${host} (${isp_type})"
-
-            # 3 - source file
-            local fw_file="${ISP_FW_FILE[$isp_type]:-}"
-            [[ -z "$fw_src" ]] && fw_src="${FIRMWARE_DIR}/${isp_type}/${fw_file}"
-            [[ ! -f "$fw_src" ]] && { err "Firmware file not found: ${fw_src}  (run 'fw save' first or use --file)"; return 1; }
-            ok "Source: ${fw_src}"
-
-            # 4 - firmware version
-            local ver; ver=$(strings "$fw_src" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
-            ok "Firmware version: ${ver}"
-
-            # 5 - primary slot warning
-            if [[ "$slot" == "primary" ]]; then
-                warn "Flashing PRIMARY slot modifies the base recovery image"
-                warn "Ensure optrom contains a valid backup before proceeding"
-            fi
-
-            # Summary
-            local scsi_host="/sys/class/scsi_host/${host}"
-            local current_ver; current_ver=$(cat "${scsi_host}/optrom_fw_version" 2>/dev/null | awk '{print $1}' || echo "?")
-            echo -e "\n  Card    : ${host} (${isp_type})"
-            echo -e "  Slot    : ${slot}"
-            echo -e "  Current : ${current_ver}"
-            echo -e "  New     : ${ver}"
-
-            # 6 - confirmation
-            if [[ $do_yes -eq 0 ]]; then
-                echo -e "\n${YLW}Proceed with flash? [y/N]${NC} \c"
-                read -r answer
-                [[ "$answer" != "y" && "$answer" != "Y" ]] && { info "Aborted"; return 0; }
-            fi
-
-            # Flash
-            info "Flashing ${slot} on ${host}..."
-            if [[ $DRY_RUN -eq 0 ]]; then
-                "$flash_bin" --slot "$slot" --port "$host" "$fw_src"
-                local rc=$?
-                [[ $rc -ne 0 ]] && { err "Flash tool exited with code ${rc}"; return 1; }
-                ok "Flash complete - reload module to verify new firmware"
-            else
-                info "[DRY-RUN] would run: ${flash_bin} --slot ${slot} --port ${host} ${fw_src}"
-            fi
-            divider
-            ;;
-        *) err "Unknown fw subcommand: ${subcmd}" ;;
+        *) err "Unknown fw subcommand: ${subcmd}"
+           err "Usage: fw list | save-dist | save | add | remove | use | show | status"
+           return 1 ;;
     esac
 }
 cmd_isp_params() {
@@ -3006,7 +3112,7 @@ LUN Mapping  : open     <extent> | --ext N
                assign   <extent> | --ext N  <wwn> | --init N  [lun]
                unassign <extent> | --ext N  <wwn> | --init N
 
-Firmware     : fw  list | add | remove | save | show | status | flash
+Firmware     : fw  list | save-dist | save | add | remove | use | show | status
 
 Config       : isp-params  list | set | use | del
 
@@ -3099,15 +3205,20 @@ ${CYN}LUN Mapping:${NC}
                                  Remove per-initiator mapping
 
 ${CYN}Firmware:${NC}
-  fw list                        List firmware files in ${FIRMWARE_DIR}
-  fw add <ISP> <file>            Copy file into firmware store
-  fw remove <ISP>                Remove stored file for ISP type
-  fw save [--port N]             Read optrom via optrom_ctl sysfs - save to store
-  fw show [--port N]             Per-port: running, primary, optrom, stored versions
+  fw list                        All stored versions per ISP type with selection marker
+  fw save-dist [--port N]        Capture TrueNAS dist firmware from /usr/lib/firmware
+                                 into versioned store with dist_<TrueNAS-version> marker
+  fw save [--port N]             Read HBA optrom via sysfs, store in versioned directory
+  fw add <ISP> <file>            Import external firmware file into versioned store
+  fw remove <ISP> <version>      Remove a specific stored version (not if selected)
+  fw use <version|hba|dist> [--port N]
+                                 Set active firmware source in config.json.
+                                 hba=HBA flash (default), dist=dist-marked version,
+                                 or a specific version string. Takes effect on next
+                                 boot or 'sync --system'.
+  fw show [--port N]             Per-port detail: running, optrom, stored versions,
+                                 selection, ql2xfwloadbin source
   fw status                      One-line summary per port with sync indicator
-  fw flash --slot <primary|optrom> [--port N] [--file <path>] [--yes]
-                                 Flash stored (or --file) firmware to card slot
-                                 Requires FLASH_TOOL (default: qlflash) in PATH
 
 ${CYN}Configuration:${NC}
   isp-params list                Show all ISP profiles; marks active (*) and detected
@@ -3143,8 +3254,7 @@ ${CYN}Index Selection:${NC}
   Mixing a positional WWN/name with --port/--init/--ext is an error.
 
 ${DIM}Config: ${QLE_ADM_HOME}/config.json
-Log:    ${LOG}
-Flash:  ${FLASH_TOOL}${NC}
+Log:    ${LOG}${NC}
 
 HELP_EOF
 )"
@@ -3246,18 +3356,29 @@ EX
     hdr "Firmware management"
     cat << 'EX'
 
-  # Save optrom firmware from card to store
+  # Capture TrueNAS dist firmware before making any changes (one-time)
+  ./qle_adm.sh fw save-dist
+
+  # Save optrom firmware from HBA to versioned store
   ./qle_adm.sh fw save
 
-  # Verify what was saved
+  # See all stored versions and current selection
   ./qle_adm.sh fw list
+
+  # Show per-port detail including running version and load source
   ./qle_adm.sh fw show
 
-  # Add a firmware file manually
+  # Switch to a stored version (takes effect on next boot or sync --system)
+  ./qle_adm.sh fw use 8.08.207
+
+  # Switch back to HBA flash firmware
+  ./qle_adm.sh fw use hba
+
+  # Import a firmware file manually
   ./qle_adm.sh fw add ISP2532 ~/ql2500_fw_8.08.207.bin
 
-  # Flash stored firmware to card (requires qlflash)
-  ./qle_adm.sh fw flash --slot primary --yes
+  # Remove a stored version (cannot remove currently selected)
+  ./qle_adm.sh fw remove ISP2532 8.07.00
 
 EX
 

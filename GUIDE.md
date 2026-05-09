@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.29: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v2.30: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -94,13 +94,9 @@ ISP2432 works correctly as a plain initiator using the `qla2xxx` module. If
 you are investigating ISP2432 target mode, use `isp-params set` and
 `module reload` to try parameter combinations without rebooting.
 
-### Why ql2xfwloadbin=0 (primary flash)
+### Why ql2xfwloadbin=0 (HBA flash)
 
-The default firmware source is the primary flash slot (`ql2xfwloadbin=0`).
-The optrom slot (`ql2xfwloadbin=1`) is an alternative. Use `fw show` to
-compare versions and choose accordingly. The firmware store
-(`fw save` / `ql2xfwloadbin=2`) is available when a filesystem overlay is
-preferred over either card slot.
+The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). This is the most stable source — firmware is burned to the card by the manufacturer or a deliberate flash operation. No file needs to be present and boot is fast. Use `fw use <version>` to switch to a stored filesystem version when needed.
 
 ---
 
@@ -341,13 +337,14 @@ All mapping commands write to both sysfs (immediate) and config.json
 ### Firmware
 
 ```bash
-./qle_adm.sh fw list                           # list stored firmware files
-./qle_adm.sh fw add ISP2532 <file>             # add to store
-./qle_adm.sh fw remove ISP2532                 # remove from store
-./qle_adm.sh fw save [--port N]                # read optrom → store
-./qle_adm.sh fw show [--port N]                # show card firmware versions
+./qle_adm.sh fw save-dist                      # capture TrueNAS dist firmware
+./qle_adm.sh fw save [--port N]                # read optrom → versioned store
+./qle_adm.sh fw list                           # list stored versions
+./qle_adm.sh fw add ISP2532 <file>             # import external file
+./qle_adm.sh fw remove ISP2532 <version>       # remove a version
+./qle_adm.sh fw use <version|hba|dist>         # set active source
+./qle_adm.sh fw show [--port N]                # show card firmware detail
 ./qle_adm.sh fw status                         # all ports summary
-./qle_adm.sh fw flash --slot <primary|optrom>  # flash card (requires qlflash)
 ```
 
 ### ISP parameter profiles
@@ -461,32 +458,65 @@ After any BE change or upgrade:
 
 | Value | Source |
 |---|---|
-| `0` | Primary flash slot (default) |
-| `1` | Optrom slot (secondary flash, not filesystem) |
-| `2` | Filesystem via `request_firmware()` |
+| `0` | HBA primary flash slot (default) |
+| `1` | Optrom slot (secondary flash) |
+| `2` | Filesystem — `/usr/lib/firmware/<fw_file>` |
 
-The ISP2532 has two flash slots. The primary slot contains the factory
-firmware. The optrom slot contains a separate firmware image. The default
-`ql2xfwloadbin=0` loads from primary flash. Use `fw show` to compare
-primary and optrom versions and choose accordingly.
+The default is `hba` (`ql2xfwloadbin=0`). When a stored version is selected via `fw use`, qle_adm copies the firmware file directly to `/usr/lib/firmware/` at boot and sets `ql2xfwloadbin=2`. The file persists within the boot environment; a BE upgrade restores the TrueNAS original naturally.
 
-### Saving optrom firmware
+### Versioned firmware store
 
-```bash
-./qle_adm.sh fw save
-./qle_adm.sh fw list   # confirm version
+Firmware is stored per ISP type in versioned subdirectories:
+
+```
+firmware/
+  ISP2532/
+    8.07.00/
+      ql2500_fw.bin
+      dist_TrueNAS-SCALE-25.04.0    ← dist marker
+    8.08.207/
+      ql2500_fw.bin
+    selected                         ← active selection
 ```
 
-This reads the optrom via the sysfs `optrom_ctl` enable/read/release
-sequence and stores the binary in `firmware/ISP2532/ql2500_fw.bin`.
-Once stored, it can be loaded via `ql2xfwloadbin=2` as a filesystem
-overlay, making the card independent of its flash slot contents.
+### Workflow
+
+```bash
+# First: capture TrueNAS dist firmware before making any changes
+./qle_adm.sh fw save-dist
+
+# Save optrom firmware from HBA
+./qle_adm.sh fw save
+
+# See all stored versions
+./qle_adm.sh fw list
+
+# Switch to a stored version (takes effect on next boot or sync --system)
+./qle_adm.sh fw use 8.08.207
+
+# Switch back to HBA flash
+./qle_adm.sh fw use hba
+
+# Show detail per port
+./qle_adm.sh fw show
+```
+
+### Command reference
+
+| Command | Description |
+|---|---|
+| `fw list` | All stored versions per ISP type with selection marker |
+| `fw save-dist [--port N]` | Capture TrueNAS dist firmware with version marker |
+| `fw save [--port N]` | Read HBA optrom via sysfs into versioned store |
+| `fw add <ISP> <file>` | Import external firmware file into versioned store |
+| `fw remove <ISP> <version>` | Remove a specific version (not if currently selected) |
+| `fw use <version\|hba\|dist> [--port N]` | Set active firmware source |
+| `fw show [--port N]` | Per-port detail: running, optrom, stored, selection |
+| `fw status` | One-line summary per port with sync indicator |
 
 ### Firmware version visibility
 
-The driver only exposes the optrom slot version via sysfs
-(`optrom_fw_version`). The primary flash version is not readable via sysfs
-on this driver build; `fw show` reports it as "not exposed by driver".
+The driver only exposes the optrom slot version via sysfs (`optrom_fw_version`). The primary flash version is not readable via sysfs on this driver build; `fw show` reports it as "not exposed".
 
 ---
 
