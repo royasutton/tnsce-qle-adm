@@ -3181,16 +3181,8 @@ if '${profile}' in entry:
 usage() {
     hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
-Deployment   : install
-               uninstall
-
-Operation    : sync [--apply] [--restart] [--system] [--preinit]
-               clear  seen | ports | mappings | names | all
-               module  load | unload | reload | status
-               teardown
-
-Status       : status
-               stats  [--watch] [--wide]
+Status       : stats  [--watch] [--wide]
+               status
                list-hba
                list-ports
                list-extents
@@ -3208,11 +3200,19 @@ LUN Mapping  : open     <extent> | --ext N
                assign   <extent> | --ext N  <wwn> | --init N  [lun]
                unassign <extent> | --ext N  <wwn> | --init N
 
-Firmware     : fw  list | save-os | save-hba | add | remove | use | show | status
+Operation    : sync [--apply] [--restart] [--system] [--preinit]
+               clear  seen | ports | mappings | names | all
+               module  load | unload | reload | status
+               teardown
+
+WWN Names    : name  list | set | get | del
 
 Config       : isp-params  list | set | use | del
 
-WWN Names    : name  list | set | get | del
+Firmware     : fw  list | save-os | save-hba | add | remove | use | show | status
+
+Deployment   : install
+               uninstall
 
 Global       : examples  help  version
                --port N   --init N   --ext N
@@ -3265,9 +3265,9 @@ ${CYN}Operation:${NC}
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
 
 ${CYN}Status:${NC}
+  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
   status                         Full state: modules, ports, sessions, gap analysis.
                                  Passively captures seen_initiators from active sessions.
-  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
   list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN
   list-ports                     FC ports with managed/unmanaged state and index [N]
   list-extents                   SCST extents with size, config state [open|assigned],
@@ -3298,6 +3298,52 @@ ${CYN}LUN Mapping:${NC}
   unassign <extent>|--ext N  <wwn>|--init N
                                  Remove per-initiator mapping
 
+${CYN}Operation:${NC}
+  sync [--apply] [--restart] [--system] [--preinit]
+                                 Rebuild scst.conf from config.json.
+                                 --apply  : rebuild scst.conf then apply to live
+                                            SCST via scstadmin. Non-disruptive.
+                                            Use when extents show [no sysfs].
+                                 --restart: rebuilds scst.conf then restarts
+                                            scst.service. All active sessions
+                                            dropped. Use after a BE change.
+                                 --system : write/restore /etc files (modprobe
+                                            conf and SCST ordering drop-in).
+                                            Implied by --preinit.
+                                 --preinit: write /etc files, reload module with
+                                            correct params. Runs before SCST
+                                            starts. Used by PREINIT boot entry.
+                                            Implies --system. Never prompts.
+                                 (no flag): scst.conf only - always safe.
+  clear <seen|ports|mappings|names|all>
+                                 Clear accumulated state from config.json and live sysfs
+  module <load|unload|reload|status>
+                                 Manual module management for initial setup and
+                                 recovery. Under normal operation the PREINIT boot
+                                 entry handles the module lifecycle automatically.
+                                 load  : modprobe qla2xxx_scst with configured params.
+                                         Use for initial setup or after unload.
+                                 unload: modprobe -r qla2xxx_scst, revert to qla2xxx.
+                                 reload: unload then load (applies param changes).
+                                 status: show loaded module, applied vs configured params.
+  teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
+
+${CYN}WWN Names:${NC}
+  name list                      All named WWNs with role and port index
+  name set <wwn> <name> [--port N]
+                                 Assign friendly name; port auto-detected for local HBA ports
+  name get <wwn>                 Show name entry for a WWN
+  name del <wwn>                 Remove name entry
+
+${CYN}Configuration:${NC}
+  isp-params list                Show all ISP profiles; marks active (*) and detected
+  isp-params set <ISP> [--profile <name>] '<params>'
+                                 Create or update a named parameter profile
+  isp-params use <ISP> --profile <name>
+                                 Set active profile (used on next module load/reload)
+  isp-params del <ISP> [--profile <name>]
+                                 Delete a profile, or entire ISP entry if no --profile
+
 ${CYN}Firmware:${NC}
   fw list                        All stored versions per ISP type with selection marker
   fw save-os [--port N]          Capture OS dist firmware from /usr/lib/firmware into
@@ -3317,21 +3363,10 @@ ${CYN}Firmware:${NC}
                                  selection, ql2xfwloadbin source
   fw status                      One-line summary per port with sync indicator
 
-${CYN}Configuration:${NC}
-  isp-params list                Show all ISP profiles; marks active (*) and detected
-  isp-params set <ISP> [--profile <name>] '<params>'
-                                 Create or update a named parameter profile
-  isp-params use <ISP> --profile <name>
-                                 Set active profile (used on next module load/reload)
-  isp-params del <ISP> [--profile <name>]
-                                 Delete a profile, or entire ISP entry if no --profile
-
-${CYN}WWN Names:${NC}
-  name list                      All named WWNs with role and port index
-  name set <wwn> <name> [--port N]
-                                 Assign friendly name; port auto-detected for local HBA ports
-  name get <wwn>                 Show name entry for a WWN
-  name del <wwn>                 Remove name entry
+${CYN}Deployment:${NC}
+  install                        Register PREINIT boot entry, write modprobe
+                                 conf and SCST ordering drop-in, copy script to QLE_ADM_HOME
+  uninstall                      Remove all installed components
 
 ${CYN}Subcommands:${NC}
   examples                       Common workflow examples
@@ -3365,14 +3400,34 @@ cmd_examples() {
 
     hdr "qle_adm.sh v${VERSION} - Examples"
 
-    hdr "First-time install"
+    hdr "Monitoring"
     cat << 'EX'
 
-  # Deploy boot service and modprobe config
-  QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
+  # Live IO stats (refreshes every 2s)
+  ./qle_adm.sh stats --watch
 
-  # Verify state after install
+  # Wide format (one line per port)
+  ./qle_adm.sh stats --wide
+
+  # Full status with gap analysis
   ./qle_adm.sh status
+
+EX
+
+    hdr "Bring up a target port and map a LUN"
+    cat << 'EX'
+
+  # See available ports and extents
+  ./qle_adm.sh list-all
+
+  # Enable port 0 as FC target
+  ./qle_adm.sh port enable --port 0
+
+  # Expose an extent to all initiators (open access)
+  ./qle_adm.sh open --ext 0
+
+  # Or assign to a specific initiator only
+  ./qle_adm.sh assign --ext 0 --init 0
 
 EX
 
@@ -3416,23 +3471,6 @@ EX
 
 EX
 
-    hdr "Bring up a target port and map a LUN"
-    cat << 'EX'
-
-  # See available ports and extents
-  ./qle_adm.sh list-all
-
-  # Enable port 0 as FC target
-  ./qle_adm.sh port enable --port 0
-
-  # Expose an extent to all initiators (open access)
-  ./qle_adm.sh open --ext 0
-
-  # Or assign to a specific initiator only
-  ./qle_adm.sh assign --ext 0 --init 0
-
-EX
-
     hdr "Name your ports and initiators"
     cat << 'EX'
 
@@ -3447,6 +3485,22 @@ EX
   # Verify
   ./qle_adm.sh name list
   ./qle_adm.sh list-initiators
+
+EX
+
+    hdr "ISP parameter profiles"
+    cat << 'EX'
+
+  # View current profiles and applied vs configured state
+  ./qle_adm.sh isp-params list
+
+  # Add an optrom-firmware profile
+  ./qle_adm.sh isp-params set ISP2532 --profile optrom \
+    "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
+
+  # Switch active profile then reload module to apply
+  ./qle_adm.sh isp-params use ISP2532 --profile optrom
+  ./qle_adm.sh module reload
 
 EX
 
@@ -3479,32 +3533,13 @@ EX
 
 EX
 
-    hdr "ISP parameter profiles"
+    hdr "First-time install"
     cat << 'EX'
 
-  # View current profiles and applied vs configured state
-  ./qle_adm.sh isp-params list
+  # Deploy boot service and modprobe config
+  QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 
-  # Add an optrom-firmware profile
-  ./qle_adm.sh isp-params set ISP2532 --profile optrom \
-    "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
-
-  # Switch active profile then reload module to apply
-  ./qle_adm.sh isp-params use ISP2532 --profile optrom
-  ./qle_adm.sh module reload
-
-EX
-
-    hdr "Monitoring"
-    cat << 'EX'
-
-  # Live IO stats (refreshes every 2s)
-  ./qle_adm.sh stats --watch
-
-  # Wide format (one line per port)
-  ./qle_adm.sh stats --wide
-
-  # Full status with gap analysis
+  # Verify state after install
   ./qle_adm.sh status
 
 EX

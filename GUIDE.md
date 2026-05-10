@@ -239,12 +239,59 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 # export QLE_ADM_USE_UNICODE=0    # uncomment if terminal can't render Unicode
 ```
 
-### Deployment
+### Status
 
 | Command | Description |
 |---|---|
-| `install` | Register PREINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
-| `uninstall` | Remove all installed components, preserve config.json |
+| `stats [--watch] [--wide]` | IO counters and link error stats |
+| `status` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
+| `list-ports` | FC ports with index, state, topology, managed status |
+| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
+| `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
+| `list-assignments` | Per-initiator LUN mappings |
+| `list-all` | All five list commands in sequence |
+
+### Log management
+
+Boot sessions are delimited in the log by `=== PREINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
+
+| Command | Description |
+|---|---|
+| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
+| `log boot` | Current boot session (from last marker to end of log) |
+| `log last [N]` | Previous N boot sessions for comparison (default 1) |
+| `log clear` | Truncate log file - confirms before clearing |
+| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
+| `log grep <pattern>` | Filter log by pattern |
+| `log path` | Print log file path |
+| `log status` | Size, line count, session count, oldest/newest entry |
+
+### Port management
+
+```bash
+./qle_adm.sh port enable  --port 0         # by index
+./qle_adm.sh port enable  <wwn>            # by WWN
+./qle_adm.sh port disable --port 0
+```
+
+Writes to both sysfs (immediate) and config.json (persistent).
+
+### LUN mapping
+
+```bash
+# Open access: all initiators see the LUN
+./qle_adm.sh open  --ext 0
+./qle_adm.sh close --ext 0
+
+# Per-initiator: specific initiator only
+./qle_adm.sh assign   --ext 0 --init 0
+./qle_adm.sh assign   --ext 0 <initiator-wwn>
+./qle_adm.sh unassign --ext 0 --init 0
+```
+
+All mapping commands write to both sysfs (immediate) and config.json
+(persistent). No separate save step is required.
 
 ### Operation
 
@@ -305,59 +352,24 @@ authoritative source for param drift detection.
 | `save` | Not needed - seen_initiators captured automatically by `status` and `list-initiators` |
 | `repair` | `sync` |
 
-### Status
-
-| Command | Description |
-|---|---|
-| `status` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
-| `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
-| `stats [--watch] [--wide]` | IO counters and link error stats |
-| `list-ports` | FC ports with index, state, topology, managed status |
-| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
-| `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
-| `list-assignments` | Per-initiator LUN mappings |
-| `list-all` | All five list commands in sequence |
-
-### Log management
-
-Boot sessions are delimited in the log by `=== PREINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
-
-| Command | Description |
-|---|---|
-| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
-| `log boot` | Current boot session (from last marker to end of log) |
-| `log last [N]` | Previous N boot sessions for comparison (default 1) |
-| `log clear` | Truncate log file - confirms before clearing |
-| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
-| `log grep <pattern>` | Filter log by pattern |
-| `log path` | Print log file path |
-| `log status` | Size, line count, session count, oldest/newest entry |
-
-### Port management
+### WWN naming
 
 ```bash
-./qle_adm.sh port enable  --port 0         # by index
-./qle_adm.sh port enable  <wwn>            # by WWN
-./qle_adm.sh port disable --port 0
+./qle_adm.sh name list
+./qle_adm.sh name set <wwn> <name> [--port N]
+./qle_adm.sh name get <wwn>
+./qle_adm.sh name del <wwn>
 ```
 
-Writes to both sysfs (immediate) and config.json (persistent).
-
-### LUN mapping
+### ISP parameter profiles
 
 ```bash
-# Open access: all initiators see the LUN
-./qle_adm.sh open  --ext 0
-./qle_adm.sh close --ext 0
-
-# Per-initiator: specific initiator only
-./qle_adm.sh assign   --ext 0 --init 0
-./qle_adm.sh assign   --ext 0 <initiator-wwn>
-./qle_adm.sh unassign --ext 0 --init 0
+./qle_adm.sh isp-params list
+./qle_adm.sh isp-params set ISP2532 --profile optrom \
+  "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
+./qle_adm.sh isp-params use ISP2532 --profile optrom
+./qle_adm.sh isp-params del ISP2532 --profile optrom
 ```
-
-All mapping commands write to both sysfs (immediate) and config.json
-(persistent). No separate save step is required.
 
 ### Firmware
 
@@ -372,24 +384,12 @@ All mapping commands write to both sysfs (immediate) and config.json
 ./qle_adm.sh fw status                         # all ports summary
 ```
 
-### ISP parameter profiles
+### Deployment
 
-```bash
-./qle_adm.sh isp-params list
-./qle_adm.sh isp-params set ISP2532 --profile optrom \
-  "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
-./qle_adm.sh isp-params use ISP2532 --profile optrom
-./qle_adm.sh isp-params del ISP2532 --profile optrom
-```
-
-### WWN naming
-
-```bash
-./qle_adm.sh name list
-./qle_adm.sh name set <wwn> <name> [--port N]
-./qle_adm.sh name get <wwn>
-./qle_adm.sh name del <wwn>
-```
+| Command | Description |
+|---|---|
+| `install` | Register PREINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
+| `uninstall` | Remove all installed components, preserve config.json |
 
 ---
 
