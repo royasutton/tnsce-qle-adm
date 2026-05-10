@@ -139,12 +139,12 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 From this point the configuration is persistent. On every boot, the TrueNAS
 POSTINIT init script registered by `install` runs `sync --boot --system`.
-It unconditionally reloads `qla2xxx_scst` with configured params - the kernel
-autoloads the module before POSTINIT runs with default params, so the reload
-is always required. SCST starts after POSTINIT exits and reads the
-reconstructed scst.conf, initializing all FC target state from it. The entry
-is visible and manageable under System > Advanced > Init/Shutdown Scripts in
-the WUI.
+It writes a boot marker to the log, rebuilds scst.conf from config.json, and
+restores the modprobe conf in `/etc`. The kernel autoloads `qla2xxx_scst` via
+udev using params from that conf; SCST starts and picks it up cleanly. No
+module reloading is performed — SCST owns the module lifecycle. The entry is
+visible and manageable under System > Advanced > Init/Shutdown Scripts in the
+WUI.
 
 ---
 
@@ -154,7 +154,9 @@ the WUI.
 ./qle_adm.sh sync --system --restart
 ```
 
-Restores the modprobe config and rebuilds scst.conf from config.json.
+Restores the modprobe conf and scst.conf from config.json, then restarts SCST
+so the module reloads with correct params. Alternatively just reboot — the
+POSTINIT entry writes the conf files and the next boot is clean.
 The POSTINIT boot entry survives upgrades automatically.
 
 ---

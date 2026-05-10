@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v2.32: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v3.0: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -247,7 +247,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Description |
 |---|---|
-| `sync [--boot] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` unconditionally reloads `qla2xxx_scst` with configured params and writes a boot marker to the log. Does not poll or apply via scstadmin - the systemd ExecStartPre drop-in (written by `--system`) ensures SCST starts only after this completes, so `qla2x00t` registers correctly. `--apply` rebuilds scst.conf then applies it to the live SCST sysfs tree via scstadmin - no restart, no session drops. Use when `list-extents` shows `[no sysfs]`. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). `--system` also restores the modprobe config and systemd drop-in in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
+| `sync [--boot] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--boot` writes a boot marker to the log, names target ports, and implies `--system`. No module touching — the kernel autoloads `qla2xxx_scst` via udev using params from the modprobe conf; SCST picks it up on start and registers `qla2x00t` cleanly. `--apply` rebuilds scst.conf then applies it to the live SCST sysfs tree via scstadmin - no restart, no session drops. Use when `list-extents` shows `[no sysfs]`. `--restart` rebuilds scst.conf then restarts scst.service (warns and confirms - all active sessions dropped). Use after a BE change to resync module params without rebooting. `--system` writes/restores the modprobe conf in `/etc`; implied by `--boot`. Without any flag, scst.conf only - always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -752,20 +752,28 @@ and sysfs writes, and no brief window where a target port is enabled but LUNs
 are not yet mapped. Runtime changes continue through sysfs for zero disruption
 to active sessions.
 
-At boot, `sync --boot` also unconditionally reloads `qla2xxx_scst` before
-SCST starts. The kernel autoloads the module via udev before any POSTINIT
-script runs, with default params rather than configured params. The reload
-corrects the params so that when SCST starts after POSTINIT exits it reads
-scst.conf against a correctly initialized module.
+**Boot sequence (normal boot):**
 
-After the reload, `sync --boot` polls for `qla2x00t` to register with SCST
-(up to 60 seconds) then applies scst.conf non-disruptively via `scstadmin`.
-This ensures LUN mappings are active without requiring a service restart.
-No SCST restart is performed by `sync --boot` - restarting SCST from outside
-the TrueNAS middleware causes the WUI to lose track of the iSCSI service state
-and report it as not running, which prompts the operator to restart it through
-the WUI, which regenerates scst.conf from the iSCSI database only and wipes
-the FC target block.
+1. Kernel boots — udev detects QLogic PCI device, autoloads `qla2xxx_scst`
+   using params from `/etc/modprobe.d/qla2xxx_scst.conf` (present from the
+   previous `sync --system` run, persists on ZFS)
+2. SCST starts — finds `qla2xxx_scst` already loaded with correct params,
+   `qla2x00t` registers successfully, scst.conf initializes FC targets
+3. POSTINIT runs `sync --boot` — writes boot marker, names ports, rewrites
+   modprobe conf and scst.conf (idempotent — same content, housekeeping only)
+
+No module reloading. No race condition. The conf file being present before
+the kernel autoload is the key invariant.
+
+**After a BE change (first boot only):**
+
+The modprobe conf and scst.conf are in `/etc` which is part of the BE root
+filesystem on ZFS. A new BE has neither file. On the first boot after a BE
+change: the kernel autoloads `qla2xxx_scst` with default params (wrong),
+SCST starts and registers `qla2x00t` (but with wrong params), POSTINIT
+writes the correct conf files. The `status` command will show a param drift
+gap. Run `sync --restart` or reboot to correct — both result in the module
+loading with correct params. All subsequent boots are clean.
 
 ---
 

@@ -12,12 +12,12 @@
 #   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
 #
 # Requires: bash, python3 (JSON only)
-# Version: 2.25
+# Version: 3.0
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="2.32"
+VERSION="3.0"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -1509,30 +1509,15 @@ cmd_sync() {
         # Boot marker - written first so log sessions are clearly delimited.
         # Used by 'log boot', 'log last', and 'log trim' to identify session boundaries.
         log "=== BOOT sync started v${VERSION} ==="
-        # Name any target ports that don't yet have a name entry. This handles
-        # HBAs added after initial install without requiring a manual name set.
+        # Name any target ports that don't yet have a name entry.
         auto_name_target_ports
-        # Always reload the module unconditionally. The kernel autoloads
-        # qla2xxx_scst via udev before POSTINIT runs, with default params.
-        # The conditional skip that was here left wrong params in place for
-        # the entire session. load_target_module calls modprobe -r first so
-        # this is safe.
-        load_target_module "$isp_type"
-        sleep 5
-        # qla2xxx_scst registers with SCST at module load time. Since SCST
-        # starts after POSTINIT exits, the module loads into a window where
-        # SCST is not yet running and the registration is lost. scstadmin_apply
-        # cannot succeed here - qla2x00t will not appear in sysfs until the
-        # module is reloaded while SCST is already running.
-        # The systemd ExecStartPre drop-in (written by sync --system) ensures
-        # SCST starts only after this script completes, which resolves the
-        # ordering problem cleanly. Without the drop-in, run 'sync --restart'
-        # after boot to reload the module while SCST is running.
-        if [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
-            info "qla2x00t not yet registered - SCST will register it on startup"
-            info "If 'status' shows a gap after boot, run: sync --restart"
-        fi
-        ok "Boot sync complete - SCST FC targets initialized from scst.conf"
+        # No module touching needed. The kernel autoloads qla2xxx_scst via udev
+        # using params from /etc/modprobe.d/qla2xxx_scst.conf (written above by
+        # --system). SCST then starts and picks up the already-loaded module,
+        # registering qla2x00t cleanly. If the modprobe conf was absent (first
+        # boot after a BE change), params will be wrong - run 'sync --restart'
+        # or reboot to correct.
+        ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
 
     elif [[ $restart_mode -eq 1 ]]; then
         # Restart the running SCST service so it re-reads the updated scst.conf.
@@ -1730,7 +1715,7 @@ cmd_module() {
                 if [[ "$applied" == "$configured" ]]; then
                     echo -e "\n  $(ok "Params match configured")"
                 else
-                    echo -e "\n  $(warn "Params differ from configured - run 'module reload' to resync")"
+                    echo -e "\n  $(warn "Params differ from configured - run 'sync --restart' or reboot to resync")"
                 fi
             elif module_loaded "qla2xxx"; then
                 warn "qla2xxx loaded (initiator mode) - not target mode"
@@ -1998,8 +1983,9 @@ cmd_status() {
         applied=$(get_applied_params)
         configured=$(get_module_params "$isp_type")
         if [[ -n "$applied" && "$applied" != "$configured" ]]; then
-            gap "Module params drift - applied differs from configured (run 'module reload' to resync)"
-            gaps=$((gaps + 1))
+            gap "Module params drift - applied differs from configured"
+            gap "Run 'sync --restart' or reboot to resync (likely caused by a BE change)"
+            gaps=$((gaps + 2))
         fi
     fi
 
@@ -3168,22 +3154,23 @@ ${CYN}Deployment:${NC}
 ${CYN}Operation:${NC}
   sync [--boot] [--restart] [--system]
                                  Rebuild scst.conf from config.json.
-                                 --boot   : also loads qla2xxx_scst with configured params;
-                                            used by the POSTINIT boot service. Writes a boot
-                                            marker to the log. Does not poll or apply via
-                                            scstadmin - the systemd drop-in (written by
-                                            --system) ensures SCST starts after this completes.
+                                 --boot   : also writes boot marker to log and names
+                                            target ports. Implies --system. Used by the
+                                            POSTINIT boot service. No module touching -
+                                            the kernel loads qla2xxx_scst via udev using
+                                            params from the modprobe conf; SCST picks it
+                                            up on start and registers qla2x00t.
                                  --apply  : rebuild scst.conf then apply to live SCST via
                                             scstadmin. Non-disruptive - no restart, no
                                             session drops. Use when extents show [no sysfs]
                                             or after any manual scst.conf change.
                                  --restart: rebuilds scst.conf then restarts scst.service.
                                             Warns and confirms before restart - all active
-                                            sessions will be dropped.
-                                 --system : also write/restore /etc files (modprobe config,
-                                            boot service, systemd drop-in). Implied by --boot.
-                                            Use explicitly after a BE change or upgrade when
-                                            not running from the boot service.
+                                            sessions will be dropped. Use after a BE change
+                                            to resync module params without rebooting.
+                                 --system : write/restore /etc files (modprobe conf and
+                                            scst.conf). Implied by --boot. Use explicitly
+                                            after a BE change before running --restart.
                                  (no flag): scst.conf only - live sysfs untouched, no
                                             /etc writes. Safe at any time.
   module <load|unload|reload|status>
