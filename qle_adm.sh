@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="3.0"
+VERSION="3.1"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -200,7 +200,8 @@ d = {
     'isp_active_profile': {},
     'wwn_names': {},
     'firmware': {},
-    'initscript_id': None
+    'initscript_id': None,
+    'initscript_preinit_id': None
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print('Config initialized.')
@@ -1069,77 +1070,156 @@ load_target_module() {
 }
 
 # ─── TrueNAS init script helpers ──────────────────────────────────────────────
-INITSCRIPT_COMMENT="qle_adm FC target boot setup"
+INITSCRIPT_COMMENT_PREINIT="qle_adm FC target preinit"
+INITSCRIPT_COMMENT_POSTINIT="qle_adm FC target postinit"
+INITSCRIPT_COMMENT="${INITSCRIPT_COMMENT_POSTINIT}"  # legacy compat
 INITSCRIPT_TIMEOUT=60
 
 # Find an existing initshutdownscript entry by comment match.
 # Prints the id, or nothing if not found.
 initscript_find_id() {
+    local comment="${1:-${INITSCRIPT_COMMENT_POSTINIT}}"
     midclt call initshutdownscript.query 2>/dev/null | python3 -c "
 import json, sys
 entries = json.load(sys.stdin)
 for e in entries:
-    if e.get('comment','') == '${INITSCRIPT_COMMENT}':
+    if e.get('comment','') == '${comment}' or e.get('comment','') == 'qle_adm FC target boot setup':
         print(e['id'])
         break
 " 2>/dev/null || true
 }
 
-# Create or update the POSTINIT entry. Prints the id on success.
-initscript_install() {
-    local cmd="QLE_ADM_HOME=${QLE_ADM_HOME} ${QLE_ADM_HOME}/qle_adm.sh sync --boot --system"
-    local existing_id; existing_id=$(initscript_find_id)
+initscript_find_id_preinit() {
+    midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+import json, sys
+entries = json.load(sys.stdin)
+for e in entries:
+    if e.get('comment','') == '${INITSCRIPT_COMMENT_PREINIT}':
+        print(e['id'])
+        break
+" 2>/dev/null || true
+}
 
+# Install or update the PREINIT entry. Prints the id on success.
+initscript_install_preinit() {
+    local cmd="QLE_ADM_HOME=${QLE_ADM_HOME} ${QLE_ADM_HOME}/qle_adm.sh sync --preinit"
+    local existing_id; existing_id=$(initscript_find_id_preinit)
     if [[ -n "$existing_id" ]]; then
-        info "Updating existing initshutdownscript entry (id=${existing_id})"
+        info "Updating existing PREINIT entry (id=${existing_id})"
         if [[ $DRY_RUN -eq 0 ]]; then
             midclt call initshutdownscript.update "${existing_id}" \
-                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT}\"}" \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"PREINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_PREINIT}\"}" \
                 >/dev/null 2>&1
         else
-            info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} ..."
+            info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} (PREINIT) ..."
         fi
         echo "$existing_id"
     else
-        info "Creating initshutdownscript POSTINIT entry"
+        info "Creating PREINIT boot entry"
         if [[ $DRY_RUN -eq 0 ]]; then
             local result
             result=$(midclt call initshutdownscript.create \
-                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT}\"}" \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"PREINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_PREINIT}\"}" \
                 2>/dev/null)
             python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$result" 2>/dev/null || true
         else
-            info "[DRY-RUN] midclt call initshutdownscript.create ..."
+            info "[DRY-RUN] midclt call initshutdownscript.create (PREINIT) ..."
         fi
     fi
 }
 
-# Delete the POSTINIT entry. Tries stored id first, falls back to comment search.
-initscript_remove() {
-    local stored_id; stored_id=$(cfg_get 'initscript_id' '')
-    local id="${stored_id}"
-    [[ -z "$id" ]] && id=$(initscript_find_id)
+# Install or update the POSTINIT entry. Prints the id on success.
+initscript_install() {
+    local cmd="QLE_ADM_HOME=${QLE_ADM_HOME} ${QLE_ADM_HOME}/qle_adm.sh sync --postinit"
+    local existing_id; existing_id=$(initscript_find_id)
 
-    if [[ -z "$id" ]]; then
-        warn "No initshutdownscript entry found to remove (already deleted or never installed)"
-        return
-    fi
-
-    if [[ $DRY_RUN -eq 0 ]]; then
-        midclt call initshutdownscript.delete "$id" 2>/dev/null && \
-            ok "Removed initshutdownscript entry (id=${id})" || \
-            warn "Failed to remove initshutdownscript entry (id=${id}) - remove manually in WUI"
+    if [[ -n "$existing_id" ]]; then
+        info "Updating existing POSTINIT entry (id=${existing_id})"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            midclt call initshutdownscript.update "${existing_id}" \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_POSTINIT}\"}" \
+                >/dev/null 2>&1
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} (POSTINIT) ..."
+        fi
+        echo "$existing_id"
     else
-        info "[DRY-RUN] midclt call initshutdownscript.delete ${id}"
+        info "Creating POSTINIT boot entry"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            local result
+            result=$(midclt call initshutdownscript.create \
+                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_POSTINIT}\"}" \
+                2>/dev/null)
+            python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$result" 2>/dev/null || true
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.create (POSTINIT) ..."
+        fi
     fi
 }
 
-# Check and report the POSTINIT entry state for cmd_status.
-# Prints ok/gap messages and returns 1 if gap found.
-initscript_status() {
+# Delete both PREINIT and POSTINIT entries.
+initscript_remove() {
+    # Remove POSTINIT entry
     local stored_id; stored_id=$(cfg_get 'initscript_id' '')
-    local found_id; found_id=$(initscript_find_id)
+    local id="${stored_id}"
+    [[ -z "$id" ]] && id=$(initscript_find_id)
+    if [[ -n "$id" ]]; then
+        if [[ $DRY_RUN -eq 0 ]]; then
+            midclt call initshutdownscript.delete "$id" 2>/dev/null && \
+                ok "Removed POSTINIT entry (id=${id})" || \
+                warn "Failed to remove POSTINIT entry (id=${id}) - remove manually in WUI"
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.delete ${id} (POSTINIT)"
+        fi
+    else
+        warn "No POSTINIT entry found to remove"
+    fi
 
+    # Remove PREINIT entry
+    local preinit_id; preinit_id=$(cfg_get 'initscript_preinit_id' '')
+    [[ -z "$preinit_id" ]] && preinit_id=$(initscript_find_id_preinit)
+    if [[ -n "$preinit_id" ]]; then
+        if [[ $DRY_RUN -eq 0 ]]; then
+            midclt call initshutdownscript.delete "$preinit_id" 2>/dev/null && \
+                ok "Removed PREINIT entry (id=${preinit_id})" || \
+                warn "Failed to remove PREINIT entry (id=${preinit_id}) - remove manually in WUI"
+        else
+            info "[DRY-RUN] midclt call initshutdownscript.delete ${preinit_id} (PREINIT)"
+        fi
+    else
+        warn "No PREINIT entry found to remove"
+    fi
+}
+
+# Check and report both PREINIT and POSTINIT entry states for cmd_status.
+# Returns 1 if any gap found.
+initscript_status() {
+    local gaps=0
+
+    # PREINIT entry
+    local preinit_id; preinit_id=$(initscript_find_id_preinit)
+    if [[ -n "$preinit_id" ]]; then
+        local enabled
+        enabled=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+import json,sys
+for e in json.load(sys.stdin):
+    if str(e.get('id','')) == '${preinit_id}':
+        print(e.get('enabled', False))
+        break
+" 2>/dev/null || echo "unknown")
+        if [[ "$enabled" == "True" ]]; then
+            ok "PREINIT boot entry registered (id=${preinit_id}, enabled)"
+        else
+            gap "PREINIT boot entry registered (id=${preinit_id}) but DISABLED - enable in WUI"
+            gaps=$((gaps + 1))
+        fi
+    else
+        gap "PREINIT boot entry missing - run 'qle_adm.sh install'"
+        gaps=$((gaps + 1))
+    fi
+
+    # POSTINIT entry
+    local found_id; found_id=$(initscript_find_id)
     if [[ -n "$found_id" ]]; then
         local enabled
         enabled=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
@@ -1153,12 +1233,14 @@ for e in json.load(sys.stdin):
             ok "POSTINIT boot entry registered (id=${found_id}, enabled)"
         else
             gap "POSTINIT boot entry registered (id=${found_id}) but DISABLED - enable in WUI"
-            return 1
+            gaps=$((gaps + 1))
         fi
     else
         gap "POSTINIT boot entry missing - run 'qle_adm.sh install'"
-        return 1
+        gaps=$((gaps + 1))
     fi
+
+    [[ $gaps -gt 0 ]] && return 1 || return 0
 }
 
 
@@ -1194,8 +1276,15 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
-    # TrueNAS POSTINIT boot entry - survives BE changes and upgrades
-    # because it lives in the TrueNAS middleware database, not in /etc.
+    # TrueNAS PREINIT boot entry - runs before SCST starts, reloads module
+    # with correct params from the modprobe conf just written above.
+    local preinit_id; preinit_id=$(initscript_install_preinit)
+    if [[ -n "$preinit_id" && $DRY_RUN -eq 0 ]]; then
+        cfg_set 'initscript_preinit_id' "$preinit_id"
+        ok "PREINIT boot entry registered (id=${preinit_id}) - visible in System > Advanced > Init/Shutdown Scripts"
+    fi
+
+    # TrueNAS POSTINIT boot entry - runs after SCST starts, applies config.
     local script_id; script_id=$(initscript_install)
     if [[ -n "$script_id" && $DRY_RUN -eq 0 ]]; then
         cfg_set 'initscript_id' "$script_id"
@@ -1461,21 +1550,29 @@ scstadmin_apply() {
 
 
 cmd_sync() {
-    local boot_mode=0 restart_mode=0 system_mode=0 apply_mode=0
+    local boot_mode=0 preinit_mode=0 postinit_mode=0 restart_mode=0 system_mode=0 apply_mode=0
     for arg in "$@"; do
-        [[ "$arg" == "--boot" ]]    && boot_mode=1
-        [[ "$arg" == "--restart" ]] && restart_mode=1
-        [[ "$arg" == "--system" ]]  && system_mode=1
-        [[ "$arg" == "--apply" ]]   && apply_mode=1
+        [[ "$arg" == "--boot" ]]     && boot_mode=1    # legacy alias for --preinit --system
+        [[ "$arg" == "--preinit" ]]  && preinit_mode=1
+        [[ "$arg" == "--postinit" ]] && postinit_mode=1
+        [[ "$arg" == "--restart" ]]  && restart_mode=1
+        [[ "$arg" == "--system" ]]   && system_mode=1
+        [[ "$arg" == "--apply" ]]    && apply_mode=1
     done
-    # --boot always implies --system (boot service owns /etc file restoration)
-    [[ $boot_mode -eq 1 ]] && system_mode=1
+    # --boot is a legacy alias: implies --preinit --system
+    if [[ $boot_mode -eq 1 ]]; then
+        preinit_mode=1
+        system_mode=1
+    fi
+    # --preinit always implies --system (/etc writes must happen before module reload)
+    [[ $preinit_mode -eq 1 ]] && system_mode=1
 
     local mode_label=""
-    [[ $boot_mode    -eq 1 ]] && mode_label+=" (boot)"
-    [[ $restart_mode -eq 1 ]] && mode_label+=" (restart)"
-    [[ $apply_mode   -eq 1 ]] && mode_label+=" (apply)"
-    [[ $system_mode  -eq 1 ]] && mode_label+=" (system)"
+    [[ $preinit_mode  -eq 1 ]] && mode_label+=" (preinit)"
+    [[ $postinit_mode -eq 1 ]] && mode_label+=" (postinit)"
+    [[ $restart_mode  -eq 1 ]] && mode_label+=" (restart)"
+    [[ $apply_mode    -eq 1 ]] && mode_label+=" (apply)"
+    [[ $system_mode   -eq 1 ]] && mode_label+=" (system)"
     hdr "Sync${mode_label}"
     cfg_init
 
@@ -1483,16 +1580,11 @@ cmd_sync() {
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
     if [[ $system_mode -eq 1 ]]; then
-        # Restore modprobe config if missing (after BE change or upgrade)
-        if [[ ! -f "$MODPROBE_CONF" ]]; then
-            warn "modprobe config missing - restoring"
-            local params; params=$(get_module_params "$isp_type")
-            file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
-        else
-            ok "modprobe config present"
-        fi
-        # The POSTINIT boot entry lives in the TrueNAS middleware DB and
-        # survives BE changes - no restoration needed here.
+        # Always write the modprobe conf - not just when missing. This ensures
+        # the correct params are always present before any module operation.
+        local params; params=$(get_module_params "$isp_type")
+        file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
+        ok "modprobe config written: ${MODPROBE_CONF}"
     else
         info "Skipping system file management (use --system to write /etc files)"
     fi
@@ -1505,23 +1597,50 @@ cmd_sync() {
         info "No ports enabled - bare TARGET_DRIVER block written. Use 'port enable' to add targets."
     fi
 
-    if [[ $boot_mode -eq 1 ]]; then
-        # Boot marker - written first so log sessions are clearly delimited.
-        # Used by 'log boot', 'log last', and 'log trim' to identify session boundaries.
-        log "=== BOOT sync started v${VERSION} ==="
-        # Name any target ports that don't yet have a name entry.
+    if [[ $preinit_mode -eq 1 ]]; then
+        # PREINIT: runs before SCST starts, /etc is mounted, SCST not yet running.
+        # The kernel autoloads qla2xxx_scst at ~3s from the initramfs with
+        # compiled-in default params (no conf available that early). We must
+        # unload and reload the module with correct params now, while SCST is
+        # guaranteed not running. SCST will then start and find the correctly
+        # configured module, registering qla2x00t cleanly.
+        log "=== PREINIT sync started v${VERSION} ==="
         auto_name_target_ports
-        # No module touching needed. The kernel autoloads qla2xxx_scst via udev
-        # using params from /etc/modprobe.d/qla2xxx_scst.conf (written above by
-        # --system). SCST then starts and picks up the already-loaded module,
-        # registering qla2x00t cleanly. If the modprobe conf was absent (first
-        # boot after a BE change), params will be wrong - run 'sync --restart'
-        # or reboot to correct.
-        ok "Boot sync complete - SCST will initialize FC targets from scst.conf"
+        if module_loaded "qla2xxx_scst"; then
+            info "Reloading qla2xxx_scst with configured params (replacing initramfs defaults)"
+            local params; params=$(get_module_params "$isp_type")
+            # Strip ql2xfwloadbin from base params - inject_firmware sets the value
+            params=$(echo "$params" | sed 's/ql2xfwloadbin=[^ ]*//g' | tr -s ' ' | sed 's/^ //;s/ $//')
+            local fwbin; fwbin=$(inject_firmware "$isp_type")
+            params="${params} ql2xfwloadbin=${fwbin}"
+            if [[ $DRY_RUN -eq 0 ]]; then
+                modprobe -r qla2xxx_scst 2>/dev/null || true
+                sleep 1
+                modprobe qla2xxx_scst $params
+                log "preinit: loaded qla2xxx_scst params=${params}"
+                ok "qla2xxx_scst reloaded with correct params"
+            else
+                info "[DRY-RUN] modprobe -r qla2xxx_scst && modprobe qla2xxx_scst ${params}"
+            fi
+        else
+            info "qla2xxx_scst not loaded - SCST will load it with correct params on start"
+        fi
+        ok "PREINIT sync complete - SCST will initialize FC targets from scst.conf"
+
+    elif [[ $postinit_mode -eq 1 ]]; then
+        # POSTINIT: runs after SCST has started. Write boot marker, name ports,
+        # apply scst.conf to live sysfs if qla2x00t is registered.
+        log "=== POSTINIT sync started v${VERSION} ==="
+        auto_name_target_ports
+        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+            scstadmin_apply 0 || true
+        else
+            warn "qla2x00t not registered with SCST - FC targets not active"
+            warn "Run 'sync --restart' to reload the module while SCST is running"
+        fi
+        ok "POSTINIT sync complete"
 
     elif [[ $restart_mode -eq 1 ]]; then
-        # Restart the running SCST service so it re-reads the updated scst.conf.
-        # Warn clearly - all active iSCSI and FC sessions will be dropped.
         local sessions=0
         for sess_path in /sys/kernel/scst_tgt/targets/*/sessions/*/; do
             [[ -d "$sess_path" ]] && sessions=$((sessions + 1))
@@ -1539,10 +1658,6 @@ cmd_sync() {
         fi
 
     elif [[ $apply_mode -eq 1 ]]; then
-        # Apply scst.conf to the live SCST sysfs tree non-disruptively.
-        # No restart, no session drops. Requires SCST to be running and
-        # qla2x00t to be registered. Use when LUN mappings are out of sync
-        # with scst.conf without wanting the disruption of --restart.
         scstadmin_apply 0 || return 1
         ok "Sync --apply complete - live sysfs updated from scst.conf"
 
@@ -1569,7 +1684,6 @@ cmd_teardown() {
     elif [[ $sessions -gt 0 ]]; then
         warn "${sessions} active session(s) will be disconnected"
     fi
-    teardown_firmware_overlay
     if module_loaded "qla2xxx_scst"; then
         run_cmd systemctl stop scst 2>/dev/null || true
         run_cmd modprobe -r qla2xxx_scst 2>/dev/null || true
@@ -3102,7 +3216,7 @@ usage() {
 Deployment   : install
                uninstall
 
-Operation    : sync [--boot] [--apply] [--restart] [--system]
+Operation    : sync [--preinit] [--postinit] [--apply] [--restart] [--system]
                module  load | unload | reload | status
                teardown
                clear  seen | ports | mappings | names | all
@@ -3154,25 +3268,24 @@ ${CYN}Deployment:${NC}
 ${CYN}Operation:${NC}
   sync [--boot] [--restart] [--system]
                                  Rebuild scst.conf from config.json.
-                                 --boot   : also writes boot marker to log and names
-                                            target ports. Implies --system. Used by the
-                                            POSTINIT boot service. No module touching -
-                                            the kernel loads qla2xxx_scst via udev using
-                                            params from the modprobe conf; SCST picks it
-                                            up on start and registers qla2x00t.
-                                 --apply  : rebuild scst.conf then apply to live SCST via
-                                            scstadmin. Non-disruptive - no restart, no
-                                            session drops. Use when extents show [no sysfs]
-                                            or after any manual scst.conf change.
-                                 --restart: rebuilds scst.conf then restarts scst.service.
-                                            Warns and confirms before restart - all active
-                                            sessions will be dropped. Use after a BE change
-                                            to resync module params without rebooting.
-                                 --system : write/restore /etc files (modprobe conf and
-                                            scst.conf). Implied by --boot. Use explicitly
-                                            after a BE change before running --restart.
-                                 (no flag): scst.conf only - live sysfs untouched, no
-                                            /etc writes. Safe at any time.
+                                 --preinit: writes /etc files then reloads
+                                            qla2xxx_scst with correct params.
+                                            Runs before SCST starts (PREINIT).
+                                            SCST then starts and registers
+                                            qla2x00t cleanly. Implies --system.
+                                 --postinit: writes boot marker, names ports,
+                                            applies scst.conf via scstadmin.
+                                            Runs after SCST starts (POSTINIT).
+                                 --apply  : rebuild scst.conf then apply to live
+                                            SCST via scstadmin. Non-disruptive.
+                                            Use when extents show [no sysfs].
+                                 --restart: rebuilds scst.conf then restarts
+                                            scst.service. All active sessions
+                                            dropped. Use after a BE change.
+                                 --system : write/restore /etc files (modprobe
+                                            conf). Implied by --preinit.
+                                 (no flag): scst.conf only - always safe.
+                                 --boot   : legacy alias for --preinit --system.
   module <load|unload|reload|status>
                                  Manage the qla2xxx_scst kernel module independently
                                  of the SCST service and configuration files.
