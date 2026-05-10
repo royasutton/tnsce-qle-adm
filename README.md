@@ -142,12 +142,13 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 ./qle_adm.sh status
 ```
 
-From this point the configuration is persistent. On every boot, two entries
-registered in the TrueNAS middleware database handle the FC target lifecycle:
-**PREINIT** runs before SCST starts — it writes the modprobe conf and scst.conf
-to `/etc`, writes the SCST ordering drop-in, then reloads `qla2xxx_scst` with
-correct params. **POSTINIT** runs after SCST starts — it applies the config
-and names target ports. Both entries survive BE changes and upgrades.
+From this point the configuration is persistent. On every boot, a single
+entry registered in the TrueNAS middleware database handles the FC target
+lifecycle: **PREINIT** runs before SCST starts — it writes the modprobe conf
+and scst.conf to `/etc`, writes the SCST ordering drop-in, then reloads
+`qla2xxx_scst` with correct params. SCST then starts and initializes FC
+targets directly from scst.conf. The PREINIT entry survives BE changes and
+upgrades.
 
 ---
 
@@ -158,8 +159,8 @@ and names target ports. Both entries survive BE changes and upgrades.
 ```
 
 Restores the modprobe conf, SCST ordering drop-in, and scst.conf, then
-restarts SCST so the module reloads with correct params. Both the PREINIT
-and POSTINIT boot entries survive upgrades automatically — no reinstall needed.
+restarts SCST so the module reloads with correct params. The PREINIT boot
+entry survives upgrades automatically — no reinstall needed.
 On the second and all subsequent boots after a BE change, PREINIT restores
 everything before SCST starts and the boot is fully automatic.
 

@@ -37,7 +37,7 @@ TrueNAS SCALE CE
     ├── config.json  (${QLE_ADM_HOME}/) ← single source of truth
     ├── /etc/scst.conf                  ← rebuilt at boot and on sync
     ├── /etc/modprobe.d/                ← module params (restored by sync --system)
-    └── TrueNAS middleware DB           ← POSTINIT boot entry (survives BE changes)
+    └── TrueNAS middleware DB           ← PREINIT boot entry (survives BE changes)
 ```
 
 ### Configuration model
@@ -148,7 +148,7 @@ mkdir -p ${QLE_ADM_HOME}
 cp qle_adm.sh ${QLE_ADM_HOME}/
 chmod +x ${QLE_ADM_HOME}/qle_adm.sh
 
-# Run install - registers POSTINIT boot entry and writes modprobe config
+# Run install - registers PREINIT boot entry and writes modprobe config
 ${QLE_ADM_HOME}/qle_adm.sh --yes install
 
 # Add to your shell startup script (~/.bashrc or ~/.zshrc) so qle_adm.sh
@@ -182,12 +182,11 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 | `/etc/modprobe.d/qla2xxx_scst.conf` | Module params | ✗ restored by PREINIT |
 | `/etc/systemd/system/scst.service.d/qle-adm-ordering.conf` | SCST starts after PREINIT | ✗ restored by PREINIT |
 | TrueNAS middleware PREINIT entry | Module reload before SCST starts | ✓ survives all BE changes |
-| TrueNAS middleware POSTINIT entry | Config apply after SCST starts | ✓ survives all BE changes |
 
-Both the PREINIT and POSTINIT entries are visible and manageable under
-System > Advanced > Init/Shutdown Scripts in the WUI. They are the only
-boot components that do not need restoring after a BE change or upgrade —
-they live in the TrueNAS middleware database.
+The PREINIT entry is visible and manageable under
+System > Advanced > Init/Shutdown Scripts in the WUI. It is the only
+boot component that does not need restoring after a BE change or upgrade —
+it lives in the TrueNAS middleware database.
 
 ### After an upgrade or boot environment change
 
@@ -198,8 +197,8 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 
 `sync --system` restores the modprobe conf, SCST ordering drop-in in `/etc`,
 and rebuilds scst.conf from config.json. `--restart` restarts SCST so the
-module reloads with correct params. Both PREINIT and POSTINIT boot entries
-survive all BE changes — no reinstall is needed.
+module reloads with correct params. The PREINIT boot entry survives all BE
+changes — no reinstall is needed.
 
 ---
 
@@ -244,14 +243,14 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Description |
 |---|---|
-| `install` | Register POSTINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
+| `install` | Register PREINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
 | `uninstall` | Remove all installed components, preserve config.json |
 
 ### Operation
 
 | Command | Description |
 |---|---|
-| `sync [--apply] [--restart] [--system] [--preinit] [--postinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts. `--postinit` writes boot marker, names ports, applies scst.conf via scstadmin — used by the POSTINIT boot entry, never prompts. Without any flag, scst.conf only — always safe. |
+| `sync [--apply] [--restart] [--system] [--preinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts, implies `--system`. Without any flag, scst.conf only — always safe. |
 | `clear <target>` | Clear accumulated state (see below) |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
@@ -321,7 +320,7 @@ authoritative source for param drift detection.
 
 ### Log management
 
-Boot sessions are delimited in the log by `=== PREINIT sync started ===` and `=== POSTINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
+Boot sessions are delimited in the log by `=== PREINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
 
 | Command | Description |
 |---|---|
@@ -464,7 +463,7 @@ echo s2idle > /etc/systemd/sleep.conf.d/mem.conf
 | `config.json` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | `qle_adm.sh` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | Firmware store on `/mnt` | ✓ | ✓ | ✓ | N/A |
-| TrueNAS middleware POSTINIT entry | ✓ | ✓ | ✓ | N/A |
+| TrueNAS middleware PREINIT entry | ✓ | ✓ | ✓ | N/A |
 | `/etc/modprobe.d/` | ✓ | ✗ | ✗ | `sync --system` |
 | `/etc/scst.conf` FC block | ✓ | ✗ | ✗ | `sync` |
 | SCST sysfs state | ✗ | ✗ | ✗ | automatic via scst.conf on boot |
@@ -648,7 +647,7 @@ systemctl start scst
 
 ### Targets not active after upgrade or BE change
 
-The POSTINIT boot entry survives the upgrade and will have run automatically.
+The PREINIT boot entry survives the upgrade and will have run automatically.
 If targets are still not active, the modprobe config or scst.conf block may
 need restoring:
 
@@ -770,8 +769,6 @@ to active sessions.
    `scst.service`, so systemd waits for PREINIT to complete first.
 4. SCST starts — finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
    registers successfully, reads scst.conf and initializes FC targets
-5. **POSTINIT** runs `sync --postinit` — writes boot marker to log, names
-   target ports, applies scst.conf via scstadmin if needed
 
 **After a BE change:** The modprobe conf, scst.conf, and the SCST ordering
 drop-in are all in `/etc` which is BE-specific. On the first boot after a
@@ -792,7 +789,7 @@ only needed in specific situations:
 - When SCST needs to re-read the updated scst.conf: `sync --restart`
 - After an upgrade or BE change and SCST needs restarting: `sync --system --restart`
 
-The POSTINIT boot entry never needs restoring - it lives in the TrueNAS
+The PREINIT boot entry never needs restoring - it lives in the TrueNAS
 middleware database and survives all BE changes and upgrades.
 
 Running `sync` at any other time is harmless - it rebuilds scst.conf from
@@ -888,7 +885,7 @@ but SCST does not re-read it until the next restart.
     "aa:bb:cc:dd:ee:ff:00:10": {"name": "workstation", "role": "initiator", "port": 0}
   },
   "firmware": {},
-  "initscript_id": 4
+  "initscript_preinit_id": 3
 }
 ```
 
@@ -902,7 +899,7 @@ but SCST does not re-read it until the next restart.
 | `isp_active_profile` | Currently selected profile per ISP type |
 | `wwn_names` | Friendly names, roles, and port indices for WWNs |
 | `firmware` | Reserved for firmware metadata |
-| `initscript_id` | TrueNAS middleware id of the registered POSTINIT boot entry. Used by `uninstall` to remove the entry without a comment search. |
+| `initscript_preinit_id` | TrueNAS middleware id of the registered PREINIT boot entry. Used by `uninstall` to remove the entry without a comment search. |
 
 ---
 

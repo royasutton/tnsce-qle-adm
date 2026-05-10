@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="3.4"
+VERSION="4.0"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -202,7 +202,6 @@ d = {
     'isp_active_profile': {},
     'wwn_names': {},
     'firmware': {},
-    'initscript_id': None,
     'initscript_preinit_id': None
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
@@ -1073,23 +1072,7 @@ load_target_module() {
 
 # ─── TrueNAS init script helpers ──────────────────────────────────────────────
 INITSCRIPT_COMMENT_PREINIT="qle_adm FC target preinit"
-INITSCRIPT_COMMENT_POSTINIT="qle_adm FC target postinit"
-INITSCRIPT_COMMENT="${INITSCRIPT_COMMENT_POSTINIT}"  # legacy compat
 INITSCRIPT_TIMEOUT=60
-
-# Find an existing initshutdownscript entry by comment match.
-# Prints the id, or nothing if not found.
-initscript_find_id() {
-    local comment="${1:-${INITSCRIPT_COMMENT_POSTINIT}}"
-    midclt call initshutdownscript.query 2>/dev/null | python3 -c "
-import json, sys
-entries = json.load(sys.stdin)
-for e in entries:
-    if e.get('comment','') == '${comment}' or e.get('comment','') == 'qle_adm FC target boot setup':
-        print(e['id'])
-        break
-" 2>/dev/null || true
-}
 
 initscript_find_id_preinit() {
     midclt call initshutdownscript.query 2>/dev/null | python3 -c "
@@ -1130,54 +1113,8 @@ initscript_install_preinit() {
     fi
 }
 
-# Install or update the POSTINIT entry. Prints the id on success.
-initscript_install() {
-    local cmd="QLE_ADM_HOME=${QLE_ADM_HOME} ${QLE_ADM_HOME}/qle_adm.sh sync --postinit"
-    local existing_id; existing_id=$(initscript_find_id)
-
-    if [[ -n "$existing_id" ]]; then
-        info "Updating existing POSTINIT entry (id=${existing_id})"
-        if [[ $DRY_RUN -eq 0 ]]; then
-            midclt call initshutdownscript.update "${existing_id}" \
-                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_POSTINIT}\"}" \
-                >/dev/null 2>&1
-        else
-            info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} (POSTINIT) ..."
-        fi
-        echo "$existing_id"
-    else
-        info "Creating POSTINIT boot entry"
-        if [[ $DRY_RUN -eq 0 ]]; then
-            local result
-            result=$(midclt call initshutdownscript.create \
-                "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"POSTINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_POSTINIT}\"}" \
-                2>/dev/null)
-            python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$result" 2>/dev/null || true
-        else
-            info "[DRY-RUN] midclt call initshutdownscript.create (POSTINIT) ..."
-        fi
-    fi
-}
-
-# Delete both PREINIT and POSTINIT entries.
+# Delete the PREINIT entry.
 initscript_remove() {
-    # Remove POSTINIT entry
-    local stored_id; stored_id=$(cfg_get 'initscript_id' '')
-    local id="${stored_id}"
-    [[ -z "$id" ]] && id=$(initscript_find_id)
-    if [[ -n "$id" ]]; then
-        if [[ $DRY_RUN -eq 0 ]]; then
-            midclt call initshutdownscript.delete "$id" 2>/dev/null && \
-                ok "Removed POSTINIT entry (id=${id})" || \
-                warn "Failed to remove POSTINIT entry (id=${id}) - remove manually in WUI"
-        else
-            info "[DRY-RUN] midclt call initshutdownscript.delete ${id} (POSTINIT)"
-        fi
-    else
-        warn "No POSTINIT entry found to remove"
-    fi
-
-    # Remove PREINIT entry
     local preinit_id; preinit_id=$(cfg_get 'initscript_preinit_id' '')
     [[ -z "$preinit_id" ]] && preinit_id=$(initscript_find_id_preinit)
     if [[ -n "$preinit_id" ]]; then
@@ -1193,7 +1130,7 @@ initscript_remove() {
     fi
 }
 
-# Check and report both PREINIT and POSTINIT entry states for cmd_status.
+# Check and report PREINIT entry state for cmd_status.
 # Returns 1 if any gap found.
 initscript_status() {
     local gaps=0
@@ -1217,28 +1154,6 @@ for e in json.load(sys.stdin):
         fi
     else
         gap "PREINIT boot entry missing - run 'qle_adm.sh install'"
-        gaps=$((gaps + 1))
-    fi
-
-    # POSTINIT entry
-    local found_id; found_id=$(initscript_find_id)
-    if [[ -n "$found_id" ]]; then
-        local enabled
-        enabled=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
-import json,sys
-for e in json.load(sys.stdin):
-    if str(e.get('id','')) == '${found_id}':
-        print(e.get('enabled', False))
-        break
-" 2>/dev/null || echo "unknown")
-        if [[ "$enabled" == "True" ]]; then
-            ok "POSTINIT boot entry registered (id=${found_id}, enabled)"
-        else
-            gap "POSTINIT boot entry registered (id=${found_id}) but DISABLED - enable in WUI"
-            gaps=$((gaps + 1))
-        fi
-    else
-        gap "POSTINIT boot entry missing - run 'qle_adm.sh install'"
         gaps=$((gaps + 1))
     fi
 
@@ -1299,13 +1214,6 @@ DROPIN
         ok "PREINIT boot entry registered (id=${preinit_id}) - visible in System > Advanced > Init/Shutdown Scripts"
     fi
 
-    # TrueNAS POSTINIT boot entry - runs after SCST starts, applies config.
-    local script_id; script_id=$(initscript_install)
-    if [[ -n "$script_id" && $DRY_RUN -eq 0 ]]; then
-        cfg_set 'initscript_id' "$script_id"
-        ok "POSTINIT boot entry registered (id=${script_id}) - visible in System > Advanced > Init/Shutdown Scripts"
-    fi
-
     # Install self
     local src_real dst_real
     src_real=$(realpath "$0" 2>/dev/null || echo "$0")
@@ -1338,19 +1246,17 @@ DROPIN
     echo -e "  ${DIM}# export QLE_ADM_USE_COLOR=0      # disable color output${NC}"
     echo -e "  ${DIM}# export QLE_ADM_USE_UNICODE=0    # ASCII symbols fallback${NC}"
 
-    # Read back and display both registered entries from middleware
+    # Read back and display the registered entry from middleware
     if [[ $DRY_RUN -eq 0 ]]; then
         local all_entries
         all_entries=$(midclt call initshutdownscript.query 2>/dev/null)
         local preinit_id; preinit_id=$(cfg_get 'initscript_preinit_id' '')
-        local postinit_id; postinit_id=$(cfg_get 'initscript_id' '')
-        for entry_id in "$preinit_id" "$postinit_id"; do
-            [[ -z "$entry_id" ]] && continue
+        if [[ -n "$preinit_id" ]]; then
             local entry
             entry=$(echo "$all_entries" | python3 -c "
 import json, sys
 for e in json.load(sys.stdin):
-    if str(e.get('id','')) == '${entry_id}':
+    if str(e.get('id','')) == '${preinit_id}':
         print(json.dumps(e))
         break
 " 2>/dev/null)
@@ -1368,7 +1274,7 @@ print(f\"  {'Comment':<12} {e['comment']}\")
 print(f\"  {'Command':<12} {e['command']}\")
 " "$entry" 2>/dev/null
             fi
-        done
+        fi
     fi
     divider
 }
@@ -1396,7 +1302,6 @@ cmd_uninstall() {
         [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload || true
     fi
     initscript_remove
-    cfg_del 'initscript_id'
 
     ok "Uninstall complete. Config preserved at ${QLE_ADM_HOME}"
     info "To fully remove: rm -rf ${QLE_ADM_HOME}"
@@ -1571,22 +1476,20 @@ scstadmin_apply() {
 
 
 cmd_sync() {
-    local boot_mode=0 preinit_mode=0 postinit_mode=0 restart_mode=0 system_mode=0 apply_mode=0
+    local boot_mode=0 preinit_mode=0 restart_mode=0 system_mode=0 apply_mode=0
     for arg in "$@"; do
         [[ "$arg" == "--preinit" ]]  && preinit_mode=1
-        [[ "$arg" == "--postinit" ]] && postinit_mode=1
         [[ "$arg" == "--restart" ]]  && restart_mode=1
         [[ "$arg" == "--system" ]]   && system_mode=1
         [[ "$arg" == "--apply" ]]    && apply_mode=1
     done
-    # --preinit and --postinit are unattended boot contexts - never prompt
-    [[ $preinit_mode -eq 1 || $postinit_mode -eq 1 ]] && YES=1
+    # --preinit is an unattended boot context - never prompt
+    [[ $preinit_mode -eq 1 ]] && YES=1
     # --preinit always implies --system (/etc writes must happen before module reload)
     [[ $preinit_mode -eq 1 ]] && system_mode=1
 
     local mode_label=""
     [[ $preinit_mode  -eq 1 ]] && mode_label+=" (preinit)"
-    [[ $postinit_mode -eq 1 ]] && mode_label+=" (postinit)"
     [[ $restart_mode  -eq 1 ]] && mode_label+=" (restart)"
     [[ $apply_mode    -eq 1 ]] && mode_label+=" (apply)"
     [[ $system_mode   -eq 1 ]] && mode_label+=" (system)"
@@ -1661,19 +1564,6 @@ DROPIN
             info "qla2xxx_scst not loaded - SCST will load it with correct params on start"
         fi
         ok "PREINIT sync complete - SCST will initialize FC targets from scst.conf"
-
-    elif [[ $postinit_mode -eq 1 ]]; then
-        # POSTINIT: runs after SCST has started. Write boot marker, name ports,
-        # apply scst.conf to live sysfs if qla2x00t is registered.
-        log "=== POSTINIT sync started v${VERSION} ==="
-        auto_name_target_ports
-        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
-            scstadmin_apply 0 || true
-        else
-            warn "qla2x00t not registered with SCST - FC targets not active"
-            warn "Run 'sync --restart' to reload the module while SCST is running"
-        fi
-        ok "POSTINIT sync complete"
 
     elif [[ $restart_mode -eq 1 ]]; then
         local sessions=0
@@ -3294,7 +3184,7 @@ usage() {
 Deployment   : install
                uninstall
 
-Operation    : sync [--apply] [--restart] [--system] [--preinit] [--postinit]
+Operation    : sync [--apply] [--restart] [--system] [--preinit]
                clear  seen | ports | mappings | names | all
                module  load | unload | reload | status
                teardown
@@ -3340,12 +3230,12 @@ ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 
 ${CYN}Deployment:${NC}
-  install                        Register PREINIT/POSTINIT boot entries, write modprobe
+  install                        Register PREINIT boot entry, write modprobe
                                  conf and SCST ordering drop-in, copy script to QLE_ADM_HOME
   uninstall                      Remove all installed components
 
 ${CYN}Operation:${NC}
-  sync [--apply] [--restart] [--system] [--preinit] [--postinit]
+  sync [--apply] [--restart] [--system] [--preinit]
                                  Rebuild scst.conf from config.json.
                                  --apply  : rebuild scst.conf then apply to live
                                             SCST via scstadmin. Non-disruptive.
@@ -3360,10 +3250,6 @@ ${CYN}Operation:${NC}
                                             correct params. Runs before SCST
                                             starts. Used by PREINIT boot entry.
                                             Implies --system. Never prompts.
-                                 --postinit: write boot marker, name ports,
-                                            apply scst.conf via scstadmin.
-                                            Runs after SCST starts. Used by
-                                            POSTINIT boot entry. Never prompts.
                                  (no flag): scst.conf only - always safe.
   clear <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
@@ -3653,7 +3539,6 @@ main() {
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
             --preinit)  args+=("--preinit"); shift ;;
-            --postinit) args+=("--postinit"); shift ;;
             --restart)  args+=("--restart"); shift ;;
             --system)   args+=("--system"); shift ;;
             *)          args+=("$1"); shift ;;
