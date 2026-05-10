@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="3.3"
+VERSION="3.4"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -2129,9 +2129,10 @@ cmd_status() {
         if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
             ok "qla2x00t registered with SCST"
         else
-            gap "qla2x00t not registered with SCST - module was loaded before SCST started"
-            gap "Run 'sync --restart' to reload the module while SCST is running"
-            gaps=$((gaps + 2))
+            gap "qla2x00t not registered with SCST"
+            gap "PREINIT may not have run, or SCST started before PREINIT completed"
+            gap "Run 'sync --restart' to recover, or reinstall to restore boot entries"
+            gaps=$((gaps + 3))
         fi
     fi
 
@@ -3261,7 +3262,7 @@ usage() {
 Deployment   : install
                uninstall
 
-Operation    : sync [--preinit] [--postinit] [--apply] [--restart] [--system]
+Operation    : sync [--apply] [--restart] [--system] [--preinit] [--postinit]
                module  load | unload | reload | status
                teardown
                clear  seen | ports | mappings | names | all
@@ -3307,22 +3308,13 @@ ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes install
 
 ${CYN}Deployment:${NC}
-  install                        Deploy systemd units and modprobe config
+  install                        Register PREINIT/POSTINIT boot entries, write modprobe
+                                 conf and SCST ordering drop-in, copy script to QLE_ADM_HOME
   uninstall                      Remove all installed components
 
 ${CYN}Operation:${NC}
-  sync [--boot] [--restart] [--system]
+  sync [--apply] [--restart] [--system] [--preinit] [--postinit]
                                  Rebuild scst.conf from config.json.
-                                 --preinit: writes /etc files then reloads
-                                            qla2xxx_scst with correct params.
-                                            Runs before SCST starts (PREINIT).
-                                            SCST then starts and registers
-                                            qla2x00t cleanly. Implies --system.
-                                            Unattended - never prompts.
-                                 --postinit: writes boot marker, names ports,
-                                            applies scst.conf via scstadmin.
-                                            Runs after SCST starts (POSTINIT).
-                                            Unattended - never prompts.
                                  --apply  : rebuild scst.conf then apply to live
                                             SCST via scstadmin. Non-disruptive.
                                             Use when extents show [no sysfs].
@@ -3330,13 +3322,23 @@ ${CYN}Operation:${NC}
                                             scst.service. All active sessions
                                             dropped. Use after a BE change.
                                  --system : write/restore /etc files (modprobe
-                                            conf). Implied by --preinit.
+                                            conf and SCST ordering drop-in).
+                                            Implied by --preinit.
+                                 --preinit: write /etc files, reload module with
+                                            correct params. Runs before SCST
+                                            starts. Used by PREINIT boot entry.
+                                            Implies --system. Never prompts.
+                                 --postinit: write boot marker, name ports,
+                                            apply scst.conf via scstadmin.
+                                            Runs after SCST starts. Used by
+                                            POSTINIT boot entry. Never prompts.
                                  (no flag): scst.conf only - always safe.
   module <load|unload|reload|status>
-                                 Manage the qla2xxx_scst kernel module independently
-                                 of the SCST service and configuration files.
+                                 Manual module management for initial setup and
+                                 recovery. Under normal operation the PREINIT boot
+                                 entry handles the module lifecycle automatically.
                                  load  : modprobe qla2xxx_scst with configured params.
-                                         Skips if already loaded with matching params.
+                                         Use for initial setup or after unload.
                                  unload: modprobe -r qla2xxx_scst, revert to qla2xxx.
                                  reload: unload then load (applies param changes).
                                  status: show loaded module, applied vs configured params.

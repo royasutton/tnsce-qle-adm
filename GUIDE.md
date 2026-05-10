@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v3.3: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v3.4: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -161,10 +161,11 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 # export QLE_ADM_USE_COLOR=0
 # export QLE_ADM_USE_UNICODE=0
 
-# Inject FC target block into scst.conf before loading the module
+# Inject FC target block into scst.conf
 ${QLE_ADM_HOME}/qle_adm.sh sync
 
-# Load the module - SCST reads the FC target block on module registration
+# If qla2xxx_scst is not yet loaded for this session, load it now.
+# On subsequent boots PREINIT handles the module lifecycle automatically.
 ${QLE_ADM_HOME}/qle_adm.sh module load
 
 # Verify - confirm no gaps before proceeding
@@ -183,9 +184,10 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 | TrueNAS middleware PREINIT entry | Module reload before SCST starts | ✓ survives all BE changes |
 | TrueNAS middleware POSTINIT entry | Config apply after SCST starts | ✓ survives all BE changes |
 
-The POSTINIT entry is visible and manageable under System > Advanced >
-Init/Shutdown Scripts in the WUI. It is the only boot component that
-does not need restoring after a BE change or upgrade.
+Both the PREINIT and POSTINIT entries are visible and manageable under
+System > Advanced > Init/Shutdown Scripts in the WUI. They are the only
+boot components that do not need restoring after a BE change or upgrade —
+they live in the TrueNAS middleware database.
 
 ### After an upgrade or boot environment change
 
@@ -194,10 +196,10 @@ ${QLE_ADM_HOME}/qle_adm.sh sync --system --restart
 ${QLE_ADM_HOME}/qle_adm.sh status
 ```
 
-`sync --system` restores the modprobe config in `/etc` and rebuilds
-scst.conf from config.json. `--restart` restarts SCST in one step.
-The POSTINIT boot entry in the TrueNAS middleware database survives
-all BE changes - no reinstall is needed.
+`sync --system` restores the modprobe conf, SCST ordering drop-in in `/etc`,
+and rebuilds scst.conf from config.json. `--restart` restarts SCST so the
+module reloads with correct params. Both PREINIT and POSTINIT boot entries
+survive all BE changes — no reinstall is needed.
 
 ---
 
@@ -249,7 +251,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Description |
 |---|---|
-| `sync [--preinit] [--postinit] [--apply] [--restart] [--system]` | Rebuild scst.conf from config.json. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry. Implies `--system`. `--postinit` writes boot marker, names ports, applies scst.conf via scstadmin — used by the POSTINIT boot entry. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf in `/etc`. Without any flag, scst.conf only — always safe. |
+| `sync [--apply] [--restart] [--system] [--preinit] [--postinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts. `--postinit` writes boot marker, names ports, applies scst.conf via scstadmin — used by the POSTINIT boot entry, never prompts. Without any flag, scst.conf only — always safe. |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 | `clear <target>` | Clear accumulated state (see below) |
@@ -736,11 +738,13 @@ for direct (switchless) ISP2532 target operation.
 
 **Q: What is the default firmware source and when should I change it?**
 
-The default is `ql2xfwloadbin=0` (primary flash slot). Use `fw show` to
-compare primary and optrom versions. If the optrom slot contains a newer
-version you want to use, change to `ql2xfwloadbin=1` via `isp-params set`.
-If you want to use a firmware file stored on the filesystem, use `fw save`
-to extract the optrom to the firmware store, then set `ql2xfwloadbin=2`.
+The default is `hba` (`ql2xfwloadbin=0`) — firmware loads from the HBA
+primary flash slot. This is the most stable and conservative choice. Use
+`fw show` to compare running, optrom, and any stored versions. To use a
+different firmware version: run `fw save-os` to capture the OS dist
+firmware and `fw save-hba` to capture the optrom firmware into the versioned
+store, then `fw use <version>` to select one. Takes effect on next boot or
+`sync --system`.
 
 ---
 

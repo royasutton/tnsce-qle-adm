@@ -1,9 +1,10 @@
 # TrueNAS SCALE CE QLogic FC Target Manager
 
 `qle_adm.sh` manages QLogic Fibre Channel HBAs as SCST targets on
-TrueNAS SCALE Community Edition. It handles module loading, LUN
-mapping, and persistent configuration across reboots and boot
-environment changes.
+TrueNAS SCALE Community Edition. It manages the configuration files
+and boot sequencing that SCST and the kernel need to operate FC targets
+correctly, and handles LUN mapping and persistent configuration across
+reboots and boot environment changes.
 
 ---
 
@@ -13,9 +14,11 @@ TrueNAS SCALE CE includes SCST and the `qla2xxx_scst` kernel module,
 but the web UI only manages iSCSI - there is no FC target configuration
 in the WUI. `qle_adm.sh` fills that gap:
 
-- Loads `qla2xxx_scst` with the correct parameters for target mode
-- Reconstructs the full FC target configuration in `/etc/scst.conf` at
-  boot from `config.json` - SCST reads it naturally at startup
+- Writes `/etc/modprobe.d/qla2xxx_scst.conf` with correct params so the
+  kernel autoloads `qla2xxx_scst` correctly, and reloads it during PREINIT
+  before SCST starts to replace the initramfs default params
+- Reconstructs the full FC target configuration in `/etc/scst.conf` before
+  SCST starts — SCST reads it at startup to initialize all FC target state
 - Maps ZFS volumes (extents) to initiators as FC LUNs via sysfs at runtime
 - Persists all configuration in `config.json` across reboots and TrueNAS
   upgrades
@@ -53,9 +56,9 @@ without touching live sysfs state or active sessions.
 - **A ZFS zvol** registered as an SCST block device in `/etc/scst.conf`
 - **A dataset under `/mnt`** for persistent storage of the script and config
 
-> **Why `/mnt`?** TrueNAS boot environments replace `/root` and `/etc` on
-> upgrade or BE switch. Only datasets under `/mnt/<pool>/` survive all
-> lifecycle events.
+> **Why `/mnt`?** TrueNAS `/etc` is a separate ZFS dataset that is
+> BE-specific — it is replaced when you switch or upgrade a boot environment.
+> Only datasets under `/mnt/<pool>/` survive all lifecycle events.
 
 ---
 
@@ -76,7 +79,8 @@ chmod +x ./qle_adm.sh
 # Inject FC target block into scst.conf
 ./qle_adm.sh sync
 
-# Load qla2xxx_scst in target mode - SCST reads the FC block on module load
+# If qla2xxx_scst is not yet loaded, load it now for this session.
+# On subsequent boots PREINIT handles this automatically.
 ./qle_adm.sh module load
 
 # Verify SCST, module, ports, and scst.conf block are all good
@@ -111,10 +115,11 @@ QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes install
 export QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm
 PATH="${PATH}:${QLE_ADM_HOME}"
 
-# 3. Inject FC target block into scst.conf before loading the module
+# 3. Inject FC target block into scst.conf
 ./qle_adm.sh sync
 
-# 4. Load the module - SCST reads the FC target block on module registration
+# 4. If qla2xxx_scst is not yet loaded for this session, load it now.
+#    On subsequent boots PREINIT handles the module lifecycle automatically.
 ./qle_adm.sh module load
 
 # 5. Verify - confirm no gaps before proceeding
@@ -137,15 +142,12 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 ./qle_adm.sh status
 ```
 
-From this point the configuration is persistent. On every boot, the TrueNAS
-PREINIT and POSTINIT init scripts registered by `install` run before and after
-SCST starts respectively.
-It writes a boot marker to the log, rebuilds scst.conf from config.json, and
-restores the modprobe conf in `/etc`. The kernel autoloads `qla2xxx_scst` via
-udev using params from that conf; SCST starts and picks it up cleanly. No
-module reloading is performed — SCST owns the module lifecycle. The entry is
-visible and manageable under System > Advanced > Init/Shutdown Scripts in the
-WUI.
+From this point the configuration is persistent. On every boot, two entries
+registered in the TrueNAS middleware database handle the FC target lifecycle:
+**PREINIT** runs before SCST starts — it writes the modprobe conf and scst.conf
+to `/etc`, writes the SCST ordering drop-in, then reloads `qla2xxx_scst` with
+correct params. **POSTINIT** runs after SCST starts — it applies the config
+and names target ports. Both entries survive BE changes and upgrades.
 
 ---
 
@@ -155,10 +157,11 @@ WUI.
 ./qle_adm.sh sync --system --restart
 ```
 
-Restores the modprobe conf and scst.conf from config.json, then restarts SCST
-so the module reloads with correct params. Alternatively just reboot — the
-POSTINIT entry writes the conf files and the next boot is clean.
-The POSTINIT boot entry survives upgrades automatically.
+Restores the modprobe conf, SCST ordering drop-in, and scst.conf, then
+restarts SCST so the module reloads with correct params. Both the PREINIT
+and POSTINIT boot entries survive upgrades automatically — no reinstall needed.
+On the second and all subsequent boots after a BE change, PREINIT restores
+everything before SCST starts and the boot is fully automatic.
 
 ---
 
