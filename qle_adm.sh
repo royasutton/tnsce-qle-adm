@@ -1919,8 +1919,40 @@ _log_extract_session() {
     fi
 }
 
+_log_strip_trailing_dividers() {
+    # Remove trailing +─...─+ divider lines that may have been logged at session end.
+    # These arise when a sync run's closing divider() output gets captured into the log.
+    # We strip them so cmd_log's own divider() call is the sole session boundary marker.
+    local line last_content_line=0 lines=()
+    while IFS= read -r line; do
+        lines+=("$line")
+    done
+    # Walk backward, dropping lines that look like a logged divider.
+    local end=$(( ${#lines[@]} - 1 ))
+    while [[ $end -ge 0 ]]; do
+        # Match bare +───+ lines (direct output) and timestamped ones ([...] +───+)
+        if [[ "${lines[$end]}" =~ ^(\[[0-9-]{10}\ [0-9:]{8}\]\ )?\+[─\-]+\+$ ]]; then
+            end=$(( end - 1 ))
+        else
+            break
+        fi
+    done
+    local i=0
+    while [[ $i -le $end ]]; do
+        printf '%s\n' "${lines[$i]}"
+        i=$(( i + 1 ))
+    done
+}
+
 cmd_log() {
     local subcmd="${1:-show}"; shift || true
+
+    # Allow bare --tail N as a shorthand for "show --tail N" since show is the default.
+    if [[ "$subcmd" == "--tail" ]]; then
+        local _tail_arg="${1:-50}"; shift || true
+        set -- "--tail" "$_tail_arg" "$@"
+        subcmd="show"
+    fi
 
     case "$subcmd" in
         show)
@@ -1941,7 +1973,7 @@ cmd_log() {
             # Show the current (most recent) boot session.
             if [[ ! -f "$LOG" ]]; then info "Log file not found: ${LOG}"; return 0; fi
             hdr "Current boot session"
-            _log_extract_session 1 || return 1
+            _log_extract_session 1 | _log_strip_trailing_dividers || return 1
             divider
             ;;
         last)
@@ -1952,7 +1984,7 @@ cmd_log() {
             while [[ $i -le $n ]]; do
                 local label; [[ $i -eq 1 ]] && label="Previous boot session" || label="Boot session -${i}"
                 hdr "$label"
-                _log_extract_session $(( i + 1 )) || break
+                _log_extract_session $(( i + 1 )) | _log_strip_trailing_dividers || break
                 divider
                 i=$(( i + 1 ))
             done
@@ -2028,7 +2060,7 @@ cmd_log() {
             ;;
         *)
             err "Unknown log subcommand: ${subcmd}"
-            err "Usage: log show [--tail N] | boot | last [N] | clear | trim [N] | grep <pattern> | path | status"
+            err "Usage: log [show] [--tail N] | boot | last [N] | clear | trim [N] | grep <pattern> | path | status"
             return 1
             ;;
     esac
