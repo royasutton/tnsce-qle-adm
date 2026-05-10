@@ -17,10 +17,12 @@
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="3.1"
+VERSION="3.3"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
+SCST_DROPIN_DIR="/etc/systemd/system/scst.service.d"
+SCST_DROPIN="${SCST_DROPIN_DIR}/qle-adm-ordering.conf"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
 LOG="${QLE_ADM_HOME}/qle_adm.log"
 
@@ -1276,6 +1278,19 @@ cmd_install() {
     info "Modprobe config for ${isp_type}: ${params}"
     file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
 
+    # Write SCST ordering drop-in
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mkdir -p "$SCST_DROPIN_DIR"
+        cat > "$SCST_DROPIN" << 'DROPIN'
+[Unit]
+After=ix-preinit.service
+DROPIN
+        systemctl daemon-reload
+        ok "SCST ordering drop-in written: ${SCST_DROPIN}"
+    else
+        info "[DRY-RUN] would write ${SCST_DROPIN} and daemon-reload"
+    fi
+
     # TrueNAS PREINIT boot entry - runs before SCST starts, reloads module
     # with correct params from the modprobe conf just written above.
     local preinit_id; preinit_id=$(initscript_install_preinit)
@@ -1323,13 +1338,16 @@ cmd_install() {
     echo -e "  ${DIM}# export QLE_ADM_USE_COLOR=0      # disable color output${NC}"
     echo -e "  ${DIM}# export QLE_ADM_USE_UNICODE=0    # ASCII symbols fallback${NC}"
 
-    # Read back and display the registered POSTINIT entry from middleware
+    # Read back and display both registered entries from middleware
     if [[ $DRY_RUN -eq 0 ]]; then
-        local entry_id; entry_id=$(cfg_get 'initscript_id' '')
-        [[ -z "$entry_id" ]] && entry_id=$(initscript_find_id)
-        if [[ -n "$entry_id" ]]; then
+        local all_entries
+        all_entries=$(midclt call initshutdownscript.query 2>/dev/null)
+        local preinit_id; preinit_id=$(cfg_get 'initscript_preinit_id' '')
+        local postinit_id; postinit_id=$(cfg_get 'initscript_id' '')
+        for entry_id in "$preinit_id" "$postinit_id"; do
+            [[ -z "$entry_id" ]] && continue
             local entry
-            entry=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+            entry=$(echo "$all_entries" | python3 -c "
 import json, sys
 for e in json.load(sys.stdin):
     if str(e.get('id','')) == '${entry_id}':
@@ -1344,14 +1362,13 @@ import json, sys
 e = json.loads(sys.argv[1])
 print(f\"  {'ID':<12} {e['id']}\")
 print(f\"  {'When':<12} {e['when']}\")
-print(f\"  {'Type':<12} {e['type']}\")
 print(f\"  {'Enabled':<12} {e['enabled']}\")
 print(f\"  {'Timeout':<12} {e['timeout']}s\")
 print(f\"  {'Comment':<12} {e['comment']}\")
 print(f\"  {'Command':<12} {e['command']}\")
 " "$entry" 2>/dev/null
             fi
-        fi
+        done
     fi
     divider
 }
@@ -1374,6 +1391,10 @@ cmd_uninstall() {
     cmd_teardown --no-confirm
 
     rm_f_v "$MODPROBE_CONF"
+    if [[ -f "$SCST_DROPIN" ]]; then
+        rm_f_v "$SCST_DROPIN"
+        [[ $DRY_RUN -eq 0 ]] && systemctl daemon-reload || true
+    fi
     initscript_remove
     cfg_del 'initscript_id'
 
@@ -1504,7 +1525,7 @@ PYEOF
 scstadmin_apply() {
     local wait_secs="${1:-0}"
 
-    # Optionally poll for qla2x00t registration (used by --boot)
+    # Optionally poll for qla2x00t registration (used by --preinit)
     if [[ $wait_secs -gt 0 ]]; then
         local elapsed=0
         while [[ ! -d /sys/kernel/scst_tgt/targets/qla2x00t ]] && \
@@ -1552,18 +1573,14 @@ scstadmin_apply() {
 cmd_sync() {
     local boot_mode=0 preinit_mode=0 postinit_mode=0 restart_mode=0 system_mode=0 apply_mode=0
     for arg in "$@"; do
-        [[ "$arg" == "--boot" ]]     && boot_mode=1    # legacy alias for --preinit --system
         [[ "$arg" == "--preinit" ]]  && preinit_mode=1
         [[ "$arg" == "--postinit" ]] && postinit_mode=1
         [[ "$arg" == "--restart" ]]  && restart_mode=1
         [[ "$arg" == "--system" ]]   && system_mode=1
         [[ "$arg" == "--apply" ]]    && apply_mode=1
     done
-    # --boot is a legacy alias: implies --preinit --system
-    if [[ $boot_mode -eq 1 ]]; then
-        preinit_mode=1
-        system_mode=1
-    fi
+    # --preinit and --postinit are unattended boot contexts - never prompt
+    [[ $preinit_mode -eq 1 || $postinit_mode -eq 1 ]] && YES=1
     # --preinit always implies --system (/etc writes must happen before module reload)
     [[ $preinit_mode -eq 1 ]] && system_mode=1
 
@@ -1585,6 +1602,24 @@ cmd_sync() {
         local params; params=$(get_module_params "$isp_type")
         file_write "$MODPROBE_CONF" "options qla2xxx_scst ${params}"
         ok "modprobe config written: ${MODPROBE_CONF}"
+
+        # Write the SCST ordering drop-in so systemd waits for ix-preinit to
+        # complete before starting scst.service. Without this, SCST and PREINIT
+        # race — SCST starts 2s into PREINIT and fails when PREINIT pulls the
+        # module. The drop-in is in /etc so it persists across reboots within
+        # the same BE. On a BE change it is lost but PREINIT restores it on the
+        # next boot (too late for that boot — use sync --restart to recover).
+        if [[ $DRY_RUN -eq 0 ]]; then
+            mkdir -p "$SCST_DROPIN_DIR"
+            cat > "$SCST_DROPIN" << 'DROPIN'
+[Unit]
+After=ix-preinit.service
+DROPIN
+            systemctl daemon-reload
+            ok "SCST ordering drop-in written: ${SCST_DROPIN}"
+        else
+            info "[DRY-RUN] would write ${SCST_DROPIN} and daemon-reload"
+        fi
     else
         info "Skipping system file management (use --system to write /etc files)"
     fi
@@ -1844,17 +1879,17 @@ cmd_module() {
 }
 
 # ─── Log management ───────────────────────────────────────────────────────────
-# Boot sessions are delimited by "=== BOOT sync started" marker lines.
+# Boot sessions are delimited by "=== PREINIT sync started" marker lines.
 # Commands that operate on sessions (boot, last, trim) require at least one
 # boot with the marker present to work correctly.
 
 _log_boot_offsets() {
-    # Print byte offsets of each boot marker line in the log.
-    grep -ob "=== BOOT sync started" "$LOG" 2>/dev/null | cut -d: -f1 || true
+    # Print byte offsets of each PREINIT boot marker line in the log.
+    grep -ob "=== PREINIT sync started" "$LOG" 2>/dev/null | cut -d: -f1 || true
 }
 
 _log_session_count() {
-    grep -c "=== BOOT sync started" "$LOG" 2>/dev/null || echo 0
+    grep -c "=== PREINIT sync started" "$LOG" 2>/dev/null || echo 0
 }
 
 _log_extract_session() {
@@ -2060,6 +2095,16 @@ cmd_status() {
     else
         gap "modprobe config missing: ${MODPROBE_CONF} - run 'qle_adm.sh sync'"
         gaps=$((gaps + 1))
+    fi
+
+    # Check SCST ordering drop-in — ensures systemd waits for ix-preinit
+    # before starting scst.service. Without it SCST races PREINIT and fails.
+    if [[ -f "$SCST_DROPIN" ]]; then
+        ok "SCST ordering drop-in present: ${SCST_DROPIN}"
+    else
+        gap "SCST ordering drop-in missing: ${SCST_DROPIN}"
+        gap "Run 'sync --system' or 'sync --preinit' to restore it"
+        gaps=$((gaps + 2))
     fi
 
     if initscript_status; then
@@ -3273,9 +3318,11 @@ ${CYN}Operation:${NC}
                                             Runs before SCST starts (PREINIT).
                                             SCST then starts and registers
                                             qla2x00t cleanly. Implies --system.
+                                            Unattended - never prompts.
                                  --postinit: writes boot marker, names ports,
                                             applies scst.conf via scstadmin.
                                             Runs after SCST starts (POSTINIT).
+                                            Unattended - never prompts.
                                  --apply  : rebuild scst.conf then apply to live
                                             SCST via scstadmin. Non-disruptive.
                                             Use when extents show [no sysfs].
@@ -3285,7 +3332,6 @@ ${CYN}Operation:${NC}
                                  --system : write/restore /etc files (modprobe
                                             conf). Implied by --preinit.
                                  (no flag): scst.conf only - always safe.
-                                 --boot   : legacy alias for --preinit --system.
   module <load|unload|reload|status>
                                  Manage the qla2xxx_scst kernel module independently
                                  of the SCST service and configuration files.
@@ -3572,7 +3618,8 @@ main() {
             --ext)      opt_ext="$2"; shift 2 ;;
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
-            --boot)     args+=("--boot"); shift ;;
+            --preinit)  args+=("--preinit"); shift ;;
+            --postinit) args+=("--postinit"); shift ;;
             --restart)  args+=("--restart"); shift ;;
             --system)   args+=("--system"); shift ;;
             *)          args+=("$1"); shift ;;

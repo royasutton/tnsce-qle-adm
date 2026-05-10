@@ -138,7 +138,8 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 ```
 
 From this point the configuration is persistent. On every boot, the TrueNAS
-POSTINIT init script registered by `install` runs `sync --boot --system`.
+PREINIT and POSTINIT init scripts registered by `install` run before and after
+SCST starts respectively.
 It writes a boot marker to the log, rebuilds scst.conf from config.json, and
 restores the modprobe conf in `/etc`. The kernel autoloads `qla2xxx_scst` via
 udev using params from that conf; SCST starts and picks it up cleanly. No

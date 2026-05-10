@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v3.1: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v3.3: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -179,6 +179,7 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 | `${QLE_ADM_HOME}/config.json` | Persistent config | ✓ |
 | `${QLE_ADM_HOME}/firmware/` | Firmware store | ✓ |
 | `/etc/modprobe.d/qla2xxx_scst.conf` | Module params | ✗ restored by PREINIT |
+| `/etc/systemd/system/scst.service.d/qle-adm-ordering.conf` | SCST starts after PREINIT | ✗ restored by PREINIT |
 | TrueNAS middleware PREINIT entry | Module reload before SCST starts | ✓ survives all BE changes |
 | TrueNAS middleware POSTINIT entry | Config apply after SCST starts | ✓ survives all BE changes |
 
@@ -298,7 +299,7 @@ authoritative source for param drift detection.
 
 | Command | Replacement |
 |---|---|
-| `setup [--boot]` | `sync [--boot]` |
+| `setup [--preinit]` | `sync [--preinit]` |
 | `apply` | Not needed - all changes write atomically to config.json + sysfs |
 | `save` | Not needed - seen_initiators captured automatically by `status` and `list-initiators` |
 | `repair` | `sync` |
@@ -318,7 +319,7 @@ authoritative source for param drift detection.
 
 ### Log management
 
-Boot sessions are delimited in the log by `=== BOOT sync started ===` marker lines written at the start of each `sync --boot` run. Session-aware commands (`boot`, `last`, `trim`) require at least one boot with v2.29 or later.
+Boot sessions are delimited in the log by `=== PREINIT sync started ===` and `=== POSTINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
 
 | Command | Description |
 |---|---|
@@ -549,7 +550,7 @@ The driver only exposes the optrom slot version via sysfs (`optrom_fw_version`).
 ## ISP Parameter Profiles
 
 Each ISP type has a set of named parameter profiles stored in `config.json`.
-One profile is marked active (`*`) and used by `sync --boot --system`. Multiple
+One profile is marked active (`*`) and used by `sync --preinit`. Multiple
 profiles allow switching between configurations without editing the config.
 
 ```bash
@@ -564,7 +565,7 @@ profiles allow switching between configurations without editing the config.
 #     Applied    : default
 ```
 
-**Configured:** the active profile that will be loaded on next `sync --boot --system`.
+**Configured:** the active profile that will be loaded on next `sync --preinit`.
 **Applied:** the params actually running in the kernel right now.
 **drift:** applied and configured differ; reload the module to resync.
 
@@ -759,17 +760,20 @@ to active sessions.
    compiled-in default params. `/etc` is not yet mounted at this point.
 2. systemd starts, `/etc` ZFS dataset mounts (~18s)
 3. **PREINIT** runs `sync --preinit` — writes modprobe conf and scst.conf
-   to `/etc`, then unloads and reloads `qla2xxx_scst` with correct params.
-   SCST is guaranteed not running at PREINIT time so the reload is safe.
+   to `/etc`, writes the SCST ordering drop-in, then unloads and reloads
+   `qla2xxx_scst` with correct params. SCST is guaranteed not running at
+   PREINIT time because the drop-in adds `After=ix-preinit.service` to
+   `scst.service`, so systemd waits for PREINIT to complete first.
 4. SCST starts — finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
    registers successfully, reads scst.conf and initializes FC targets
 5. **POSTINIT** runs `sync --postinit` — writes boot marker to log, names
    target ports, applies scst.conf via scstadmin if needed
 
-**After a BE change:** Same sequence — PREINIT writes the correct conf and
-reloads the module before SCST starts. No extra reboot or manual step needed.
-The PREINIT and POSTINIT entries survive BE changes because they live in the
-TrueNAS middleware database.
+**After a BE change:** The modprobe conf, scst.conf, and the SCST ordering
+drop-in are all in `/etc` which is BE-specific. On the first boot after a
+BE change all three are absent. SCST and PREINIT race — SCST may win and
+fail. Run `sync --system` then `sync --restart` to recover. PREINIT then
+restores all three files for all subsequent boots.
 
 ---
 
