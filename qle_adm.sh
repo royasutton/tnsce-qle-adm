@@ -3295,9 +3295,9 @@ Deployment   : install
                uninstall
 
 Operation    : sync [--apply] [--restart] [--system] [--preinit] [--postinit]
+               clear  seen | ports | mappings | names | all
                module  load | unload | reload | status
                teardown
-               clear  seen | ports | mappings | names | all
 
 Status       : status
                stats  [--watch] [--wide]
@@ -3365,6 +3365,8 @@ ${CYN}Operation:${NC}
                                             Runs after SCST starts. Used by
                                             POSTINIT boot entry. Never prompts.
                                  (no flag): scst.conf only - always safe.
+  clear <seen|ports|mappings|names|all>
+                                 Clear accumulated state from config.json and live sysfs
   module <load|unload|reload|status>
                                  Manual module management for initial setup and
                                  recovery. Under normal operation the PREINIT boot
@@ -3375,8 +3377,6 @@ ${CYN}Operation:${NC}
                                  reload: unload then load (applies param changes).
                                  status: show loaded module, applied vs configured params.
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
-  clear <seen|ports|mappings|names|all>
-                                 Clear accumulated state from config.json and live sysfs
 
 ${CYN}Status:${NC}
   status                         Full state: modules, ports, sessions, gap analysis.
@@ -3698,9 +3698,9 @@ main() {
         install)         cmd_install ;;
         uninstall)       cmd_uninstall ;;
         sync)            cmd_sync "${rest[@]}" ;;
-        teardown)        cmd_teardown ;;
-        module)          cmd_module "${rest[@]}" ;;
         clear)           cmd_clear "${rest[@]}" ;;
+        module)          cmd_module "${rest[@]}" ;;
+        teardown)        cmd_teardown ;;
         status)          cmd_status ;;
         stats)           cmd_stats "${rest[@]}" ;;
         log)             cmd_log "${rest[@]}" ;;

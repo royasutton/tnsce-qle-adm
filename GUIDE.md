@@ -252,9 +252,9 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | Command | Description |
 |---|---|
 | `sync [--apply] [--restart] [--system] [--preinit] [--postinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts. `--postinit` writes boot marker, names ports, applies scst.conf via scstadmin — used by the POSTINIT boot entry, never prompts. Without any flag, scst.conf only — always safe. |
+| `clear <target>` | Clear accumulated state (see below) |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
-| `clear <target>` | Clear accumulated state (see below) |
 
 **clear targets:**
 ```
