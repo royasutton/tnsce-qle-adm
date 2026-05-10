@@ -3181,14 +3181,14 @@ if '${profile}' in entry:
 usage() {
     hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
-Status       : stats  [--watch] [--wide]
-               status
-               list-hba
-               list-ports
-               list-extents
-               list-initiators
-               list-assignments
-               list-all
+Status       : stats  [--watch] [--wide]        sw  si
+               status                            st
+               list-hba                          lh
+               list-ports                        lp
+               list-extents                      le
+               list-initiators                   li
+               list-assignments                  la
+               list-all                          ll
 
 Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
                     grep <pattern> | path | status
@@ -3265,16 +3265,16 @@ ${CYN}Operation:${NC}
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
 
 ${CYN}Status:${NC}
-  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s
-  status                         Full state: modules, ports, sessions, gap analysis.
+  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s    (sw / si)
+  status                         Full state: modules, ports, sessions, gap analysis.  (st)
                                  Passively captures seen_initiators from active sessions.
-  list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN
-  list-ports                     FC ports with managed/unmanaged state and index [N]
-  list-extents                   SCST extents with size, config state [open|assigned],
+  list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN    (lh)
+  list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
+  list-extents                   SCST extents with size, config state [open|assigned],  (le)
                                  and live sysfs state [no sysfs|mapped|connected|active]
-  list-initiators                Connected initiators with IO stats; seen history always shown
-  list-assignments               Per-initiator LUN mappings
-  list-all                       Runs all five list commands in sequence
+  list-initiators                Connected initiators with IO stats; seen history always shown  (li)
+  list-assignments               Per-initiator LUN mappings    (la)
+  list-all                       Runs all five list commands in sequence    (ll)
 
 ${CYN}Log Management:${NC}
   log show [--tail N]            Full log (paged); --tail N shows last N lines
@@ -3621,15 +3621,17 @@ main() {
         clear)           cmd_clear "${rest[@]}" ;;
         module)          cmd_module "${rest[@]}" ;;
         teardown)        cmd_teardown ;;
-        status)          cmd_status ;;
+        status|st)       cmd_status ;;
         stats)           cmd_stats "${rest[@]}" ;;
+        sw)              cmd_stats "--watch" ;;
+        si)              cmd_stats "--wide" ;;
         log)             cmd_log "${rest[@]}" ;;
-        list-hba)        cmd_list_hba ;;
-        list-ports)      cmd_list_ports ;;
-        list-extents)    cmd_list_extents ;;
-        list-initiators) cmd_list_initiators "${rest[@]}" ;;
-        list-assignments) cmd_list_assignments ;;
-        list-all)        cmd_list_all ;;
+        list-hba|lh)     cmd_list_hba ;;
+        list-ports|lp)   cmd_list_ports ;;
+        list-extents|le) cmd_list_extents ;;
+        list-initiators|li) cmd_list_initiators "${rest[@]}" ;;
+        list-assignments|la) cmd_list_assignments ;;
+        list-all|ll)     cmd_list_all ;;
         port)
             local sub="${rest[0]:-}"
             local pos="${rest[1]:-}"

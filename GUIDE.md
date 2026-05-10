@@ -241,16 +241,16 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 ### Status
 
-| Command | Description |
-|---|---|
-| `stats [--watch] [--wide]` | IO counters and link error stats |
-| `status` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
-| `list-hba` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
-| `list-ports` | FC ports with index, state, topology, managed status |
-| `list-extents` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
-| `list-initiators` | Connected initiators with IO stats; previously seen initiators always shown |
-| `list-assignments` | Per-initiator LUN mappings |
-| `list-all` | All five list commands in sequence |
+| Command | Short | Description |
+|---|---|---|
+| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats |
+| `status` | `st` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
+| `list-ports` | `lp` | FC ports with index, state, topology, managed status |
+| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
+| `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
+| `list-assignments` | `la` | Per-initiator LUN mappings |
+| `list-all` | `ll` | All five list commands in sequence |
 
 ### Log management
 
