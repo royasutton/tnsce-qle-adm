@@ -205,7 +205,8 @@ d = {
     'firmware': {},
     'initscript_preinit_id': None,
     'boot_mode': 'reload',
-    'rootwait_was_preexisting': False
+    'rootwait_was_preexisting': False,
+    'pending_luns_version': 1
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print('Config initialized.')
@@ -2075,6 +2076,86 @@ DROPIN
     fi
 
     # Non-boot sync path: write scst.conf, optionally restart or apply.
+
+    # Pending LUN changes: validate merged map before writing scst.conf.
+    # Validation only runs when --restart or --apply is given, since those
+    # are the only paths that actually apply the new LUN numbers. Without a
+    # flag, scst.conf is written from current (non-pending) luns only.
+    if [[ $restart_mode -eq 1 || $apply_mode -eq 1 ]]; then
+        local pending_conflict=0
+        local pending_wwns
+        pending_wwns=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for wwn, data in d.get('assignments', {}).items():
+    if data.get('pending_luns'):
+        print(wwn)
+" 2>/dev/null || true)
+        if [[ -n "$pending_wwns" ]]; then
+            while IFS= read -r wwn; do
+                local valid
+                valid=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+a = d.get('assignments', {}).get('${wwn}', {})
+luns = dict(a.get('luns', {}))
+pending = dict(a.get('pending_luns', {}))
+merged = {}
+for ext, n in luns.items():
+    merged[ext] = pending.get(ext, n)
+for ext, n in pending.items():
+    if ext not in merged:
+        merged[ext] = n
+seen = {}
+for ext, n in merged.items():
+    if n in seen:
+        print(f'conflict:{n}:{seen[n]}:{ext}')
+        exit()
+    seen[n] = ext
+print('ok')
+" 2>/dev/null || echo "ok")
+                if [[ "$valid" != "ok" ]]; then
+                    local clun cext1 cext2
+                    IFS=: read -r _ clun cext1 cext2 <<< "$valid"
+                    err "Pending LUN conflict for ${wwn}: LUN ${clun} claimed by both '${cext1}' and '${cext2}'"
+                    err "Resolve with 'lun set' before applying. Use 'lun status' to review."
+                    pending_conflict=1
+                fi
+            done <<< "$pending_wwns"
+            if [[ $pending_conflict -eq 1 ]]; then
+                err "Pending LUN conflicts must be resolved before sync can apply changes."
+                return 1
+            fi
+            # All pending maps are valid - promote pending_luns into luns
+            info "Promoting pending LUN changes..."
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for wwn, data in d.get('assignments', {}).items():
+    pending = data.get('pending_luns', {})
+    if pending:
+        for ext, n in pending.items():
+            data.setdefault('luns', {})[ext] = n
+        data['pending_luns'] = {}
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+" 2>/dev/null
+            ok "Pending LUN changes promoted and will be applied"
+            log "sync: pending LUN changes promoted for: $(echo "$pending_wwns" | tr '\n' ' ')"
+        fi
+    fi
+
+    # Also warn if pending changes exist but no apply flag was given
+    if [[ $restart_mode -eq 0 && $apply_mode -eq 0 ]]; then
+        local has_pending
+        has_pending=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+total = sum(len(data.get('pending_luns', {})) for data in d.get('assignments', {}).values())
+print(total)
+" 2>/dev/null || echo "0")
+        [[ "$has_pending" -gt 0 ]] && \
+            warn "Pending LUN changes exist (${has_pending} entries). Apply with 'sync --restart' or 'sync --apply'."
+    fi
     render_scst_conf || return 1
 
     # Warn if config.json contains assignments for extents no longer in scst.conf.
@@ -3292,9 +3373,9 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
     ok "Unassigned ${extent} from ${initiator} (${_ulbl})"
 }
 
-cmd_clear() {
+cmd_reset() {
     local subcmd="${1:-}"; shift || true
-    [[ -z "$subcmd" ]] && { err "Usage: clear <seen|ports|mappings|names|all>"; return 1; }
+    [[ -z "$subcmd" ]] && { err "Usage: reset <seen|ports|mappings|names|all>"; return 1; }
 
     _clear_seen() {
         py_json "
@@ -3400,7 +3481,7 @@ print(count)
             ok "All operational state cleared"
             ok "ISP params, firmware store, and active profiles preserved"
             ;;
-        *) err "Unknown clear target: ${subcmd}  (seen|ports|mappings|names|all)" ;;
+        *) err "Unknown reset target: ${subcmd}  (seen|ports|mappings|names|all)" ;;
     esac
 }
 
@@ -3720,6 +3801,244 @@ cmd_fw() {
            return 1 ;;
     esac
 }
+cmd_lun() {
+    local subcmd="${1:-}"; shift || true
+    [[ -z "$subcmd" ]] && { err "Usage: lun <set|clear-pending|status> ..."; return 1; }
+
+    # _lun_merged_map <wwn>
+    # Returns the merged desired LUN map for an initiator:
+    # current luns from config.json overlaid with pending_luns.
+    # Prints "lun:extent" pairs one per line.
+    _lun_merged_map() {
+        local wwn="$1"
+        py_json "
+import json
+d = json.load(open('${CONFIG}'))
+a = d.get('assignments', {}).get('${wwn}', {})
+luns = dict(a.get('luns', {}))
+pending = dict(a.get('pending_luns', {}))
+merged = {}
+for ext, n in luns.items():
+    merged[ext] = pending.get(ext, n)
+for ext, n in pending.items():
+    if ext not in merged:
+        merged[ext] = n
+for ext, n in sorted(merged.items(), key=lambda x: x[1]):
+    print(f'{n}:{ext}')
+"
+    }
+
+    # _lun_merged_valid <wwn>
+    # Returns 'ok' if the merged map is unique (no duplicate LUN numbers).
+    # Returns 'conflict:<lun>:<ext1>:<ext2>' for the first conflict found.
+    _lun_merged_valid() {
+        local wwn="$1"
+        py_json "
+import json
+d = json.load(open('${CONFIG}'))
+a = d.get('assignments', {}).get('${wwn}', {})
+luns = dict(a.get('luns', {}))
+pending = dict(a.get('pending_luns', {}))
+merged = {}
+for ext, n in luns.items():
+    merged[ext] = pending.get(ext, n)
+for ext, n in pending.items():
+    if ext not in merged:
+        merged[ext] = n
+seen = {}
+for ext, n in merged.items():
+    if n in seen:
+        print(f'conflict:{n}:{seen[n]}:{ext}')
+        exit()
+    seen[n] = ext
+print('ok')
+"
+    }
+
+    # _lun_show_pending <wwn>
+    # Prints the current pending state and merged map for an initiator.
+    _lun_show_pending() {
+        local wwn="$1"
+        local lbl; lbl=$(wwn_label "$wwn" "initiator")
+        local pending
+        pending=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+p = d.get('assignments', {}).get('${wwn}', {}).get('pending_luns', {})
+for ext, n in sorted(p.items(), key=lambda x: x[1]):
+    cur = d.get('assignments', {}).get('${wwn}', {}).get('luns', {}).get(ext, '?')
+    print(f'{ext} {cur} {n}')
+")
+        if [[ -z "$pending" ]]; then
+            echo -e "  ${DIM}No pending LUN changes for ${wwn} (${lbl})${NC}"
+            return
+        fi
+        echo -e "\n  ${CYN}Pending LUN changes for ${WHT}${wwn}${CYN} (${lbl}):${NC}"
+        while IFS=' ' read -r ext cur new; do
+            echo -e "    ${WHT}${ext}:${NC}  LUN ${cur} -> LUN ${new}"
+        done <<< "$pending"
+        echo -e "\n  ${CYN}Merged desired state:${NC}"
+        while IFS=: read -r n ext; do
+            local cur_lun; cur_lun=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+print(d.get('assignments',{}).get('${wwn}',{}).get('luns',{}).get('${ext}','?'))
+")
+            local tag=""
+            [[ "$cur_lun" != "$n" ]] && tag="  ${YLW}(pending from LUN ${cur_lun})${NC}"
+            echo -e "    LUN ${n}: ${ext}${tag}"
+        done < <(_lun_merged_map "$wwn")
+        local valid; valid=$(_lun_merged_valid "$wwn")
+        if [[ "$valid" == "ok" ]]; then
+            echo -e "\n  ${GRN}State: READY${NC} - no conflicts. Apply with 'sync --restart' or reboot."
+        else
+            local clun cext1 cext2
+            IFS=: read -r _ clun cext1 cext2 <<< "$valid"
+            echo -e "\n  ${YLW}State: NOT READY${NC} - conflict at LUN ${clun}: both '${cext1}' and '${cext2}' pending."
+            echo -e "  Use 'lun set' to resolve before applying."
+        fi
+    }
+
+    case "$subcmd" in
+
+        set)
+            # lun set <extent> <wwn> <new-lun>
+            local ext="${1:-}" wwn="${2:-}" new_lun="${3:-}"
+            [[ -z "$ext" || -z "$wwn" || -z "$new_lun" ]] && {
+                err "Usage: lun set <extent> <wwn> <new-lun>"
+                return 1
+            }
+            [[ "$new_lun" =~ ^[0-9]+$ ]] || { err "LUN must be a non-negative integer"; return 1; }
+
+            # Verify extent is assigned to this initiator
+            local assigned
+            assigned=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+exts = d.get('assignments', {}).get('${wwn}', {}).get('extents', [])
+print('yes' if '${ext}' in exts else 'no')
+")
+            [[ "$assigned" == "yes" ]] || {
+                err "Extent '${ext}' is not assigned to ${wwn}"
+                err "Use 'list-assignments' to see current assignments"
+                return 1
+            }
+
+            # Get current live LUN for this extent
+            local cur_lun
+            cur_lun=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+print(d.get('assignments', {}).get('${wwn}', {}).get('luns', {}).get('${ext}', '?'))
+")
+
+            if [[ "$new_lun" == "$cur_lun" ]]; then
+                # Cancels any pending change for this extent
+                py_json "
+import json
+d = json.load(open('${CONFIG}'))
+p = d.get('assignments', {}).get('${wwn}', {}).get('pending_luns', {})
+if '${ext}' in p:
+    del p['${ext}']
+    d['assignments']['${wwn}']['pending_luns'] = p
+    json.dump(d, open('${CONFIG}', 'w'), indent=2)
+    print('cancelled')
+else:
+    print('noop')
+" | grep -q "cancelled" \
+                    && ok "Pending change for '${ext}' cancelled - already at LUN ${cur_lun}" \
+                    || info "'${ext}' is already at LUN ${cur_lun} - no change"
+            else
+                # Write to pending_luns (no validation - validated at apply time)
+                py_json "
+import json
+d = json.load(open('${CONFIG}'))
+if 'pending_luns' not in d['assignments']['${wwn}']:
+    d['assignments']['${wwn}']['pending_luns'] = {}
+d['assignments']['${wwn}']['pending_luns']['${ext}'] = int('${new_lun}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+                ok "Pending: '${ext}' LUN ${cur_lun} -> LUN ${new_lun} for ${wwn}"
+                log "lun set: ${ext} LUN ${cur_lun} -> ${new_lun} for ${wwn} [pending]"
+            fi
+            echo ""
+            _lun_show_pending "$wwn"
+            ;;
+
+        clear-pending)
+            # lun clear-pending <wwn> | --all
+            local target="${1:-}"
+            [[ -z "$target" ]] && { err "Usage: lun clear-pending <wwn>|--all"; return 1; }
+            if [[ "$target" == "--all" ]]; then
+                local count
+                count=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+total = 0
+for wwn, data in d.get('assignments', {}).items():
+    total += len(data.get('pending_luns', {}))
+    data['pending_luns'] = {}
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+print(total)
+")
+                ok "All pending LUN changes cleared (${count} entries removed)"
+                log "lun clear-pending --all: ${count} entries cleared"
+            else
+                local count
+                count=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+p = d.get('assignments', {}).get('${target}', {}).get('pending_luns', {})
+count = len(p)
+if '${target}' in d.get('assignments', {}):
+    d['assignments']['${target}']['pending_luns'] = {}
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+print(count)
+")
+                ok "Pending LUN changes cleared for ${target} (${count} entries removed)"
+                log "lun clear-pending ${target}: ${count} entries cleared"
+            fi
+            ;;
+
+        status)
+            # lun status [<wwn>]
+            local target="${1:-}"
+            hdr "LUN Pending Changes"
+            if [[ -n "$target" ]]; then
+                _lun_show_pending "$target"
+            else
+                # Show all initiators that have pending changes
+                local wwns
+                wwns=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for wwn, data in d.get('assignments', {}).items():
+    if data.get('pending_luns'):
+        print(wwn)
+")
+                if [[ -z "$wwns" ]]; then
+                    echo -e "  ${DIM}No pending LUN changes${NC}"
+                else
+                    while IFS= read -r wwn; do
+                        _lun_show_pending "$wwn"
+                        echo ""
+                    done <<< "$wwns"
+                fi
+            fi
+            divider
+            ;;
+
+        *)
+            err "Unknown lun subcommand: ${subcmd}"
+            err "Usage: lun <set|clear-pending|status>"
+            err "  lun set <extent> <wwn> <new-lun>"
+            err "  lun clear-pending <wwn>|--all"
+            err "  lun status [<wwn>]"
+            return 1
+            ;;
+    esac
+}
+
 cmd_isp_params() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
@@ -3871,7 +4190,8 @@ LUN Mapping  : open     <extent> | --ext N
                unassign <extent> | --ext N  <wwn> | --init N
 
 Operation    : sync [--apply] [--restart] [--boot]
-               clear  seen | ports | mappings | names | all
+               reset  seen | ports | mappings | names | all
+               lun    set | clear-pending | status
                module  load | unload | reload | status
                teardown
 
@@ -3922,8 +4242,15 @@ ${CYN}Operation:${NC}
                                             Used by the boot entry.
                                             (--preinit/--system are aliases)
                                  (no flag): scst.conf only - always safe.
-  clear <seen|ports|mappings|names|all>
+  reset <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
+  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
+                                 in config.json; does not touch live sysfs. Multiple lun set
+                                 calls can be staged; validated as a unit at apply time.
+                                 Setting the current live LUN number cancels any pending change.
+  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
+  lun status [<wwn>]            Show pending LUN changes and merged desired state with
+                                 conflict detection. Prints READY or NOT READY.
   module <load|unload|reload|status>
                                  Manual module management for initial setup and
                                  recovery. Under normal operation the boot entry
@@ -3986,8 +4313,15 @@ ${CYN}Operation:${NC}
                                             starts. Used by PREINIT boot entry.
                                             Implies --system. Never prompts.
                                  (no flag): scst.conf only - always safe.
-  clear <seen|ports|mappings|names|all>
+  reset <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
+  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
+                                 in config.json; does not touch live sysfs. Multiple lun set
+                                 calls can be staged; validated as a unit at apply time.
+                                 Setting the current live LUN number cancels any pending change.
+  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
+  lun status [<wwn>]            Show pending LUN changes and merged desired state with
+                                 conflict detection. Prints READY or NOT READY.
   module <load|unload|reload|status>
                                  Manual module management for initial setup and
                                  recovery. Under normal operation the PREINIT boot
@@ -4303,7 +4637,8 @@ main() {
     case "$cmd" in
         deploy)          cmd_deploy "${rest[@]}" ;;
         sync)            cmd_sync "${rest[@]}" ;;
-        clear)           cmd_clear "${rest[@]}" ;;
+        lun)            cmd_lun         "${rest[@]}" ;;
+        reset)          cmd_reset       "${rest[@]}" ;;
         module)          cmd_module "${rest[@]}" ;;
         teardown)        cmd_teardown ;;
         status|st)       cmd_status ;;

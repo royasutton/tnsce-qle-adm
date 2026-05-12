@@ -298,17 +298,58 @@ All mapping commands write to both sysfs (immediate) and config.json
 | Command | Description |
 |---|---|
 | `sync [--apply] [--restart] [--system] [--preinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running; used by the PREINIT boot entry, never prompts, implies `--system`. Without any flag, scst.conf only; always safe. |
-| `clear <target>` | Clear accumulated state (see below) |
+| `reset <target>` | Reset accumulated state (see below) |
+| `lun <set\|clear-pending\|status>` | Stage deferred LUN number changes (see below) |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 
-**clear targets:**
+**reset targets:**
 ```
-clear seen       : wipe seen_initiators history
-clear ports      : disable all ports and clear enabled_ports
-clear mappings   : remove all open/assigned LUNs from sysfs and config
-clear names      : wipe all WWN names
-clear all        : all of the above (prompts unless --yes)
+reset seen       : wipe seen_initiators history
+reset ports      : disable all ports and clear enabled_ports
+reset mappings   : remove all open/assigned LUNs from sysfs and config
+reset names      : wipe all WWN names
+reset all        : all of the above (prompts unless --yes)
+```
+
+### Deferred LUN number changes
+
+LUN numbers can be changed without disrupting live sessions by staging
+the change into `pending_luns` in `config.json`. The change is only
+applied when `sync --restart` or `sync --apply` is run, or on next reboot.
+Multiple changes can be staged and are validated as a unit at apply time.
+
+```
+lun set <extent> <wwn> <new-lun>
+    Stage a LUN number change for an extent/initiator pair. Does not
+    touch live sysfs. Setting the current live LUN number cancels any
+    pending change for that extent. Each call prints the current pending
+    state and a READY / NOT READY indicator.
+
+lun clear-pending <wwn>
+    Clear all pending LUN changes for a specific initiator.
+
+lun clear-pending --all
+    Clear all pending LUN changes across all initiators.
+
+lun status [<wwn>]
+    Show pending changes and the merged desired LUN map with conflict
+    detection. Reports READY (no conflicts) or NOT READY with details.
+```
+
+Conflict detection runs at apply time (`sync --restart` or `sync --apply`).
+If the merged map contains duplicate LUN numbers, the entire pending set
+is rejected and nothing is written. Resolve with further `lun set` calls
+then re-run `sync --restart`.
+
+Example - swap LUN 0 and LUN 1 for an initiator without session disruption
+until the restart:
+
+```bash
+qle_adm.sh lun set g1ed2-debian  51:40:2e:c0:01:7c:6f:1c 1
+qle_adm.sh lun set g1ed2-truenas 51:40:2e:c0:01:7c:6f:1c 0
+qle_adm.sh lun status
+qle_adm.sh sync --restart
 ```
 
 ### Module management
