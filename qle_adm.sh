@@ -1488,21 +1488,23 @@ DROPIN
 
     _deploy_post_reconfigure_prompt() {
         local new_mode="$1"
+        _reconfigure_used_sync=0
         echo -e "\n  ${CYN}Mode changed to ${WHT}${new_mode}${CYN}. Changes take full effect on next boot.${NC}"
         echo -e "  Options:\n"
-        echo -e "  ${WHT}1)${NC} Reboot now            — clean, guaranteed correct"
-        echo -e "  ${WHT}2)${NC} sync --restart         — write scst.conf and restart SCST immediately"
-        echo -e "                          (drops all active FC and iSCSI sessions)"
-        echo -e "  ${WHT}3)${NC} Do nothing             — new mode takes full effect on next boot\n"
+        echo -e "  ${WHT}1)${NC} Reboot now       - clean, guaranteed correct"
+        echo -e "  ${WHT}2)${NC} sync --restart   - write scst.conf and restart SCST immediately"
+        echo -e "                                   (drops all active FC and iSCSI sessions)"
+        echo -e "  ${WHT}3)${NC} Do nothing       - new mode takes full effect on next boot\n"
         echo -en "${YLW}?${NC}  Choose [1/2/3] (default: 3): "
         local reply; read -r reply
         case "${reply:-3}" in
             1)
-                warn "Rebooting in 5 seconds — Ctrl-C to cancel"
+                warn "Rebooting in 5 seconds - Ctrl-C to cancel"
                 sleep 5
                 reboot
                 ;;
             2)
+                _reconfigure_used_sync=1
                 cmd_sync --restart
                 ;;
             3)
@@ -1695,12 +1697,13 @@ DROPIN
             log "deploy reconfigure: ${cur_mode} -> ${new_mode}"
             ok "Boot mode changed: ${cur_mode} → ${new_mode}"
 
+            local _reconfigure_used_sync=0
             if [[ $YES -eq 0 && $DRY_RUN -eq 0 ]]; then
                 _deploy_post_reconfigure_prompt "$new_mode"
             else
                 info "Reboot to activate new boot mode: ${new_mode}"
             fi
-            divider
+            [[ $_reconfigure_used_sync -eq 0 ]] && divider || true
             ;;
 
         status)
