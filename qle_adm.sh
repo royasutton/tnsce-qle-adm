@@ -2888,8 +2888,14 @@ except: pass
                 _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
             done
             local stale_tag=""
-            [[ $stale -eq 1 ]] && stale_tag=" ${YLW}[run: unassign ${ext}]${NC}"
-            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")${stale_tag}"
+            if [[ $stale -eq 1 ]]; then
+                local _cmds=""
+                for _w in $assigned_inits; do
+                    _cmds+=$'\n'"      ${DIM}run: unassign ${ext} ${_w}${NC}"
+                done
+                stale_tag="$_cmds"
+            fi
+            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size="" serial=""
@@ -2917,7 +2923,7 @@ else:
             usn="${usn%\[key\]}"
             [[ -n "$usn" ]] && serial="${CYN}s/n:${NC} ${DIM}${usn}${NC}"
         fi
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}"
+        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}${stale_tag}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
 
@@ -2952,15 +2958,17 @@ try:
 except: pass
 ")
             local assigned=""
+            local unassign_cmds=""
             if [[ -n "$assigned_inits" ]]; then
                 _parts=()
                 for _w in $assigned_inits; do
                     _lbl=$(wwn_label "$_w" "initiator")
                     _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
+                    unassign_cmds+=$'\n'"      ${DIM}run: unassign ${ext} ${_w}${NC}"
                 done
-                assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}") ${YLW}[run: unassign ${ext}]${NC}"
+                assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
             fi
-            echo -e "  [*] ${YLW}${ext}${NC}  ${YLW}[stale - not in scst.conf]${NC}${assigned:+  ${assigned}}"
+            echo -e "  [*] ${YLW}${ext}${NC}  ${YLW}[stale - not in scst.conf]${NC}${assigned:+  ${assigned}}${unassign_cmds}"
             idx=$((idx + 1))
         done <<< "$stale_extents"
     fi
@@ -3033,7 +3041,7 @@ cmd_list_assignments() {
             [[ -z "$ext" ]] && continue
             local stale_tag=""
             if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
-                stale_tag="  ${YLW}[stale - not in scst.conf, run: unassign ${ext}]${NC}"
+                stale_tag=$'\n'"      ${DIM}run: close ${ext}${NC}"
             fi
             echo -e "  LUN ${lun}: ${WHT}${ext}${NC}${stale_tag}"
             lun=$((lun + 1))
@@ -3072,7 +3080,7 @@ PYEOF
                 lun="${pair%%:*}"
                 ext="${pair#*:}"
                 if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
-                    stale_tag="  ${YLW}[stale - not in scst.conf, run: unassign ${ext}]${NC}"
+                    stale_tag=$'\n'"        ${DIM}run: unassign ${ext} ${init}${NC}"
                     stale_warned=1
                 fi
                 echo -e "    LUN ${lun}: ${ext}${stale_tag}"
