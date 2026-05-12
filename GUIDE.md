@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v4.1: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v5.0: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
