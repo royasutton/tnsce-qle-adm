@@ -1196,12 +1196,24 @@ PYEOF
 # grub_apply <new_options_string>
 # Calls middleware to write the new kernel_extra_options string.
 grub_apply() {
-    local new_opts="$1"
+    local new_opts="${1:-}"
     if [[ $DRY_RUN -eq 0 ]]; then
-        midclt call system.advanced.update \
-            "{\"kernel_extra_options\":\"${new_opts}\"}" >/dev/null 2>&1 \
-            && ok "kernel_extra_options applied: ${new_opts:-<empty>}" \
-            || { err "Failed to apply kernel_extra_options via middleware"; return 1; }
+        # Some middleware versions reject a missing key; always send the field,
+        # using an empty string when all owned tokens have been removed.
+        local payload
+        payload=$(printf '{"kernel_extra_options":"%s"}' "$new_opts")
+        if midclt call system.advanced.update "$payload" >/dev/null 2>&1; then
+            ok "kernel_extra_options applied: ${new_opts:-<empty>}"
+        else
+            # Retry with explicit empty string in case the payload quoting failed
+            if [[ -z "$new_opts" ]] && midclt call system.advanced.update \
+                    '{"kernel_extra_options":""}' >/dev/null 2>&1; then
+                ok "kernel_extra_options applied: <empty>"
+            else
+                err "Failed to apply kernel_extra_options via middleware"
+                return 1
+            fi
+        fi
     else
         info "[DRY-RUN] midclt call system.advanced.update '{\"kernel_extra_options\":\"${new_opts}\"}'"
     fi
@@ -1433,7 +1445,7 @@ cmd_deploy() {
 [Unit]
 After=ix-preinit.service
 DROPIN
-            systemctl daemon-reload
+            systemctl daemon-reload || true
             ok "SCST ordering drop-in written: ${SCST_DROPIN}"
         else
             info "[DRY-RUN] would write ${SCST_DROPIN} and daemon-reload"
@@ -2041,7 +2053,7 @@ cmd_sync() {
 [Unit]
 After=ix-preinit.service
 DROPIN
-            systemctl daemon-reload
+            systemctl daemon-reload || true
             ok "SCST ordering drop-in written: ${SCST_DROPIN}"
         else
             info "[DRY-RUN] would write ${SCST_DROPIN} and daemon-reload"
