@@ -14,8 +14,6 @@
 # Requires: bash, python3 (JSON only)
 # Version: 5.0
 
-set -euo pipefail
-
 # ─── Configuration ────────────────────────────────────────────────────────────
 VERSION="5.0"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
@@ -286,7 +284,7 @@ confirm() {
     fi
     echo -en "${YLW}?${NC}  ${msg} [y/N] "
     local reply
-    read -r reply
+    read -r reply || true
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
@@ -308,7 +306,7 @@ mkdir_v() {
         info "[AUTO-YES] Create directory: ${dir}?"
     else
         echo -en "${YLW}?${NC}  Create directory: ${dir}? [y/N] "
-        local reply; read -r reply
+        local reply; read -r reply || true
         [[ "$reply" =~ ^[Yy]$ ]] || { info "Skipped: ${dir}"; return 0; }
     fi
     mkdir -pv "$dir"
@@ -359,7 +357,7 @@ ${YLW}Existing:${NC} ${path}"
             echo "$content"
             echo -e "$div"
             echo -en "${YLW}?${NC}  Overwrite file: ${path}? [y/N] "
-            local reply; read -r reply
+            local reply; read -r reply || true
             [[ "$reply" =~ ^[Yy]$ ]] || { info "Skipped: ${path}"; return 0; }
         fi
     else
@@ -373,7 +371,7 @@ ${CYN}New file:${NC} ${path} ${DIM}(does not exist)${NC}"
             echo "$content"
             echo -e "$div"
             echo -en "${YLW}?${NC}  Create file: ${path}? [y/N] "
-            local reply; read -r reply
+            local reply; read -r reply || true
             [[ "$reply" =~ ^[Yy]$ ]] || { info "Skipped: ${path}"; return 0; }
         fi
     fi
@@ -618,11 +616,13 @@ get_isp_type_dominant() {
     # and returns the most common one so the module param selection still works.
     # If no ISP type can be determined, returns ISP2532 as a safe default for
     # target mode and emits a warning.
+    # NOTE: warn() writes to stdout; redirect to stderr here so callers using
+    # $(...) capture only the clean ISP type string, not the warning text.
     local all_types
     all_types=$(detect_hbas | awk '{print $4}' | grep -v UNKNOWN | sort | uniq -c | sort -rn)
 
     if [[ -z "$all_types" ]]; then
-        warn "Could not determine ISP type from detected HBAs - defaulting to ISP2532"
+        warn "Could not determine ISP type from detected HBAs - defaulting to ISP2532" >&2
         echo "ISP2532"
         return
     fi
@@ -630,8 +630,8 @@ get_isp_type_dominant() {
     local distinct
     distinct=$(echo "$all_types" | wc -l | tr -d ' ')
     if [[ "$distinct" -gt 1 ]]; then
-        warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')"
-        warn "Module params will use the most common type - verify with 'module status'"
+        warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')" >&2
+        warn "Module params will use the most common type - verify with 'module status'" >&2
     fi
 
     echo "$all_types" | awk '{print $2}' | head -1
@@ -1348,7 +1348,7 @@ initscript_install_preinit() {
         if [[ $DRY_RUN -eq 0 ]]; then
             midclt call initshutdownscript.update "${existing_id}" \
                 "{\"type\":\"COMMAND\",\"command\":\"${cmd}\",\"when\":\"PREINIT\",\"enabled\":true,\"timeout\":${INITSCRIPT_TIMEOUT},\"comment\":\"${INITSCRIPT_COMMENT_PREINIT}\"}" \
-                >/dev/null 2>&1
+                >/dev/null 2>&1 || true
         else
             info "[DRY-RUN] midclt call initshutdownscript.update ${existing_id} (PREINIT) ..."
         fi
@@ -1501,7 +1501,7 @@ DROPIN
         echo -e "              Firmware: HBA, OS dist, or user-stored versions." >/dev/tty
         echo -e "              (default, same as previous behaviour)\n" >/dev/tty
         echo -en "${YLW}?${NC}  Choose mode [grub/blacklist/reload] (default: reload): " >/dev/tty
-        local reply; read -r reply </dev/tty
+        local reply; read -r reply </dev/tty || true
         reply="${reply:-reload}"
         case "$reply" in
             grub|blacklist|reload) echo "$reply" ;;
@@ -1519,7 +1519,7 @@ DROPIN
         echo -e "                       (drops all active FC and iSCSI sessions)"
         echo -e "  ${WHT}3)${NC} Do nothing       - new mode takes full effect on next boot\n"
         echo -en "${YLW}?${NC}  Choose [1/2/3] (default: 3): "
-        local reply; read -r reply
+        local reply; read -r reply || true
         case "${reply:-3}" in
             1)
                 warn "Rebooting in 5 seconds - Ctrl-C to cancel"
@@ -1694,7 +1694,28 @@ DROPIN
             esac
 
             if [[ "$new_mode" == "$cur_mode" ]]; then
-                ok "Already in ${cur_mode} mode - no changes needed"
+                info "Already in ${cur_mode} mode."
+                if [[ $YES -eq 1 ]]; then
+                    info "Re-applying ${cur_mode} mode artefacts (--yes)"
+                else
+                    echo -en "${YLW}?${NC}  Re-apply ${cur_mode} mode artefacts to fix any gaps? [y/N] "
+                    local reapply_reply; read -r reapply_reply || true
+                    if [[ ! "$reapply_reply" =~ ^[Yy]$ ]]; then
+                        info "No changes made."
+                        divider; return 0
+                    fi
+                fi
+                local isp_type; isp_type=$(get_isp_type_dominant)
+                [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
+                info "Re-applying ${cur_mode} mode artefacts..."
+                echo ""
+                _deploy_write_common_artefacts "$isp_type" "$cur_mode"
+                if [[ "$cur_mode" == "grub" || "$cur_mode" == "blacklist" ]]; then
+                    _deploy_install_grub_options "$cur_mode" "$isp_type"
+                fi
+                [[ $DRY_RUN -eq 0 ]] && cfg_set 'boot_mode' "$cur_mode"
+                log "deploy reconfigure: re-applied ${cur_mode} mode"
+                ok "Re-applied ${cur_mode} mode artefacts"
                 divider; return 0
             fi
 
@@ -3515,7 +3536,7 @@ print(count)
             warn "Clearing all operational state (seen, ports, mappings, names)"
             [[ $YES -eq 0 ]] && {
                 echo -e "${YLW}Proceed? [y/N]${NC} \c"
-                read -r answer
+                read -r answer || true
                 [[ "$answer" != "y" && "$answer" != "Y" ]] && { info "Aborted"; return 0; }
             }
             _clear_ports    >/dev/null
