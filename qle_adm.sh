@@ -1264,12 +1264,14 @@ PYEOF
 
     # Record rootwait tracking in config
     if [[ $DRY_RUN -eq 0 ]]; then
+        local rw_pre_str
+        [[ "$rootwait_preexisting" == "true" ]] && rw_pre_str="True" || rw_pre_str="False"
         py_json "
 import json
 d = json.load(open('${CONFIG}'))
-d['rootwait_was_preexisting'] = ${rootwait_preexisting}
+d['rootwait_was_preexisting'] = ${rw_pre_str}
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
-"
+" || true
     fi
 }
 
@@ -2664,9 +2666,11 @@ cmd_status() {
         fi
     else
         if [[ -f "$MODPROBE_CONF" ]]; then
-            ok "modprobe config present: ${MODPROBE_CONF}"
+            ok "modprobe conf present: ${MODPROBE_CONF}"
         else
-            gap "modprobe config missing: ${MODPROBE_CONF} - run 'sync --boot'"
+            gap "modprobe conf missing: ${MODPROBE_CONF}"
+            gap "  This is normal after a BE change or upgrade - the boot entry will"
+            gap "  restore it on next reboot. To restore now: sync --boot"
             gaps=$((gaps + 1))
         fi
     fi
