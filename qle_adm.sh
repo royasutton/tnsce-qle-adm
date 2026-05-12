@@ -1202,21 +1202,23 @@ grub_apply() {
     fi
 }
 
-# grub_show_diff <before> <after>
+# grub_show_diff <before> <after> [step_label]
 # Prints a before/after diff of the kernel options string.
 grub_show_diff() {
-    local before="$1" after="$2"
-    echo -e "\n  ${CYN}kernel_extra_options:${NC}"
+    local before="$1" after="$2" label="${3:-}"
+    [[ -n "$label" ]] && echo -e "  ${CYN}${label}${NC}"
+    echo -e "  ${CYN}kernel_extra_options:${NC}"
     echo -e "  ${YLW}Before:${NC} ${before:-<empty>}"
     echo -e "  ${GRN}After: ${NC} ${after:-<empty>}"
     echo ""
 }
 
-# grub_install_mode <mode> <isp_type> <params>
+# grub_install_mode <mode> <isp_type> <params> [step_label] [confirm_msg]
 # Computes new options string for the given mode, shows diff, confirms, applies.
 # Also updates rootwait_was_preexisting in config.
 grub_install_mode() {
     local mode="$1" isp_type="$2" params="$3"
+    local step_label="${4:-}" confirm_msg="${5:-Apply these kernel_extra_options changes?}"
     local current; current=$(grub_read_current)
 
     local parsed; parsed=$(grub_parse "$current")
@@ -1258,8 +1260,9 @@ print(" ".join(p for p in parts if p))
 PYEOF
 )
 
-    grub_show_diff "$current" "$new_opts"
-    confirm_or_abort "Apply these kernel_extra_options changes?"
+    echo ""
+    grub_show_diff "$current" "$new_opts" "$step_label"
+    confirm_or_abort "$confirm_msg"
     grub_apply "$new_opts"
 
     # Record rootwait tracking in config
@@ -1275,10 +1278,11 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
     fi
 }
 
-# grub_remove_owned
+# grub_remove_owned [step_label] [confirm_msg]
 # Strips all qle_adm-owned tokens from kernel_extra_options.
 # Preserves rootwait if it was pre-existing before qle_adm installed it.
 grub_remove_owned() {
+    local step_label="${1:-}" confirm_msg="${2:-Remove qle_adm kernel_extra_options tokens?}"
     local current; current=$(grub_read_current)
     local parsed; parsed=$(grub_parse "$current")
     local foreign; foreign=$(echo "$parsed" | grep '^FOREIGN:' | cut -d: -f2-)
@@ -1297,8 +1301,9 @@ PYEOF
 )
 
     [[ "$current" == "$new_opts" ]] && { info "No qle_adm-owned tokens found in kernel_extra_options"; return 0; }
-    grub_show_diff "$current" "$new_opts"
-    confirm_or_abort "Remove qle_adm kernel_extra_options tokens?"
+    echo ""
+    grub_show_diff "$current" "$new_opts" "$step_label"
+    confirm_or_abort "$confirm_msg"
     grub_apply "$new_opts"
 }
 
@@ -1448,20 +1453,21 @@ DROPIN
     }
 
     _deploy_install_grub_options() {
-        local mode="$1" isp_type="$2"
+        local mode="$1" isp_type="$2" step_label="${3:-}"
         local params; params=$(get_module_params "$isp_type")
         info "Configuring kernel_extra_options for ${mode} mode (${isp_type}): ${params}"
-        grub_install_mode "$mode" "$isp_type" "$params"
+        grub_install_mode "$mode" "$isp_type" "$params" "$step_label" "Apply these kernel_extra_options changes?"
     }
 
     _deploy_remove_grub_options() {
+        local step_label="${1:-}"
         local current; current=$(grub_read_current)
         local parsed; parsed=$(grub_parse "$current")
         local existing_owned; existing_owned=$(echo "$parsed" | grep '^OWNED:' | cut -d: -f2-)
         if [[ -z "${existing_owned// /}" ]]; then
             info "No qle_adm-owned tokens found in kernel_extra_options - nothing to remove"
         else
-            grub_remove_owned
+            grub_remove_owned "$step_label" "Remove these kernel_extra_options tokens?"
         fi
     }
 
@@ -1678,19 +1684,30 @@ DROPIN
             local isp_type; isp_type=$(get_isp_type_dominant)
             [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
-            info "Switching: ${cur_mode} → ${new_mode}"
+            info "Switching: ${cur_mode} -> ${new_mode}"
             echo ""
+
+            # Determine if both old and new modes touch kernel_extra_options
+            local two_step=0
+            if [[ ( "$cur_mode" == "grub" || "$cur_mode" == "blacklist" ) && \
+                  ( "$new_mode" == "grub" || "$new_mode" == "blacklist" ) ]]; then
+                two_step=1
+            fi
 
             # Tear down old mode artefacts
             if [[ "$cur_mode" == "grub" || "$cur_mode" == "blacklist" ]]; then
+                local remove_label=""
+                [[ $two_step -eq 1 ]] && remove_label="Step 1 of 2 - Remove ${cur_mode} mode tokens"
                 info "Removing old kernel cmdline tokens (${cur_mode} mode)..."
-                _deploy_remove_grub_options
+                _deploy_remove_grub_options "$remove_label"
             fi
 
             # Set up new mode artefacts
             _deploy_write_common_artefacts "$isp_type" "$new_mode"
             if [[ "$new_mode" == "grub" || "$new_mode" == "blacklist" ]]; then
-                _deploy_install_grub_options "$new_mode" "$isp_type"
+                local install_label=""
+                [[ $two_step -eq 1 ]] && install_label="Step 2 of 2 - Add ${new_mode} mode tokens"
+                _deploy_install_grub_options "$new_mode" "$isp_type" "$install_label"
             fi
 
             [[ $DRY_RUN -eq 0 ]] && cfg_set 'boot_mode' "$new_mode"
