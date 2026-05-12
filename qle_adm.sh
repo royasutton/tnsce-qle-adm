@@ -12,15 +12,16 @@
 #   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
 #
 # Requires: bash, python3 (JSON only)
-# Version: 3.0
+# Version: 4.1
 
 set -euo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="4.0"
+VERSION="4.1"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
+SCST_CONF="/etc/scst.conf"
 SCST_DROPIN_DIR="/etc/systemd/system/scst.service.d"
 SCST_DROPIN="${SCST_DROPIN_DIR}/qle-adm-ordering.conf"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
@@ -485,7 +486,7 @@ get_initiator_wwn_by_index() {
 }
 
 get_extents_sorted() {
-    grep -E '^\s+DEVICE\s+' /etc/scst.conf 2>/dev/null | awk '{print $2}' | sort -u
+    grep -E '^\s+DEVICE\s+' "${SCST_CONF}" 2>/dev/null | awk '{print $2}' | sort -u
 }
 
 get_extent_by_index() {
@@ -1316,9 +1317,9 @@ cmd_uninstall() {
 # (at runtime after a WUI iSCSI save wiped the block). SCST reads the file
 # naturally at startup - no sysfs apply step is needed or performed at boot.
 render_scst_conf() {
-    local conf="/etc/scst.conf"
+    local conf="${SCST_CONF}"
     if [[ ! -f "$conf" ]]; then
-        err "/etc/scst.conf not found - SCST must be installed and started at least"
+        err "${SCST_CONF} not found - SCST must be installed and started at least"
         err "once before qle_adm can write the FC target block."
         err "Verify SCST is active: systemctl is-active scst"
         return 1
@@ -2300,7 +2301,7 @@ except: pass
             assigned="${DIM}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
-        local size=""
+        local size="" serial=""
         if [[ -d "$dev_path" ]]; then
             local size_mb_raw; size_mb_raw=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "")
             if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
@@ -2317,11 +2318,29 @@ else:
     print(f'{kib:6.2f} KiB')
 " 2>/dev/null || echo "${size_mb_raw} MB")
             fi
+            # Resolve backing block device serial via udevadm (works for zvols
+            # and physical disks). Fallback to sysfs device/serial for bare disks.
+            local backing_dev; backing_dev=$(sysfs_read "${dev_path}/filename" 2>/dev/null || echo "")
+            if [[ -n "$backing_dev" ]]; then
+                local blkname; blkname=$(basename "$backing_dev")
+                local udev_serial; udev_serial=$(udevadm info --query=property \
+                    --name="$backing_dev" 2>/dev/null \
+                    | grep -E '^(ID_SERIAL_SHORT|ID_SERIAL)=' \
+                    | head -1 | cut -d= -f2- || echo "")
+                if [[ -n "$udev_serial" ]]; then
+                    serial="${DIM}s/n:${udev_serial}${NC}"
+                else
+                    local sysfs_serial; sysfs_serial=$(cat \
+                        "/sys/block/${blkname}/device/serial" 2>/dev/null \
+                        | tr -d ' ' || echo "")
+                    [[ -n "$sysfs_serial" ]] && serial="${DIM}s/n:${sysfs_serial}${NC}"
+                fi
+            fi
         fi
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${assigned:+  ${assigned}}"
+        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
-    [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in /etc/scst.conf${NC}" || true
+    [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in ${SCST_CONF}${NC}" || true
     divider
 }
 

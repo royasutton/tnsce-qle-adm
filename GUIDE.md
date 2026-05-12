@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v3.4: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v4.1: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -638,6 +638,12 @@ No SCST restart needed - the WUI does not restart SCST on iSCSI saves.
 it only modifies an existing file. If the file is missing, SCST has either
 never been started or its installation is incomplete.
 
+> **WARNING:** At least one iSCSI target must be defined in the TrueNAS iSCSI
+> WUI (Sharing → iSCSI → Targets) for `/etc/scst.conf` to be created. The
+> target name does not matter — its mere existence triggers the file. Without
+> any iSCSI target defined, SCST starts but does not write `scst.conf`, and
+> `qle_adm.sh sync` will fail with "scst.conf not found".
+
 ```bash
 systemctl is-active scst
 systemctl start scst
@@ -722,6 +728,17 @@ you make any iSCSI change and save, the WUI regenerates `/etc/scst.conf`
 from that database, replacing the file entirely. Run `sync` after a WUI
 iSCSI save to rebuild the FC target block from config.json. The WUI does not
 restart SCST on iSCSI saves, so active sessions are unaffected.
+
+---
+
+**Q: Why does `sync` fail with "scst.conf not found" even though SCST is running?**
+
+`/etc/scst.conf` is created by TrueNAS when it saves iSCSI configuration. If
+no iSCSI targets have ever been defined in the WUI (Sharing → iSCSI → Targets),
+TrueNAS never writes the file. At least one iSCSI target must exist for
+`scst.conf` to be created — the target name and configuration do not matter,
+its existence is the trigger. Create a placeholder iSCSI target in the WUI,
+save, and `scst.conf` will appear. Then run `sync` to add the FC target block.
 
 ---
 
