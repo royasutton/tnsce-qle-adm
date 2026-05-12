@@ -2461,12 +2461,12 @@ cmd_module() {
 # boot with the marker present to work correctly.
 
 _log_boot_offsets() {
-    # Print byte offsets of each PREINIT boot marker line in the log.
-    grep -ob "=== PREINIT sync started" "$LOG" 2>/dev/null | cut -d: -f1 || true
+    # Print byte offsets of each boot sync marker line in the log.
+    grep -ob "=== Boot sync started" "$LOG" 2>/dev/null | cut -d: -f1 || true
 }
 
 _log_session_count() {
-    grep -c "=== PREINIT sync started" "$LOG" 2>/dev/null || echo 0
+    grep -c "=== Boot sync started" "$LOG" 2>/dev/null || echo 0
 }
 
 _log_extract_session() {
@@ -2712,12 +2712,13 @@ cmd_status() {
         else
             ok "modprobe conf absent (correct for grub mode)"
         fi
-        # Check kernel_extra_options for owned tokens
+        # Check and display kernel_extra_options owned tokens
         local cur_opts; cur_opts=$(grub_read_current)
         local parsed; parsed=$(grub_parse "$cur_opts")
         local owned; owned=$(echo "$parsed" | grep '^OWNED:' | cut -d: -f2-)
+        echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
         if [[ -n "${owned// /}" ]]; then
-            ok "kernel_extra_options owned tokens: ${owned}"
+            ok "kernel_extra_options: qle_adm-owned tokens present"
         else
             gap "kernel_extra_options: no qle_adm-owned tokens found - run 'deploy reconfigure'"
             gaps=$((gaps + 1))
@@ -2733,13 +2734,20 @@ cmd_status() {
         fi
     fi
 
-    # blacklist mode: check module_blacklist token
+    # blacklist mode: check and display kernel_extra_options tokens
     if [[ "$cur_boot_mode" == "blacklist" ]]; then
         local cur_opts; cur_opts=$(grub_read_current)
+        echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
         if echo "$cur_opts" | grep -q "module_blacklist=qla2xxx_scst"; then
             ok "kernel_extra_options: module_blacklist=qla2xxx_scst present"
         else
             gap "kernel_extra_options: module_blacklist=qla2xxx_scst missing - run 'deploy reconfigure'"
+            gaps=$((gaps + 1))
+        fi
+        if echo "$cur_opts" | grep -qw "rootwait"; then
+            ok "kernel_extra_options: rootwait present"
+        else
+            gap "kernel_extra_options: rootwait missing - run 'deploy reconfigure'"
             gaps=$((gaps + 1))
         fi
     fi
