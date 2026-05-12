@@ -491,6 +491,13 @@ get_extents_sorted() {
     grep -E '^\s+DEVICE\s+' "${SCST_CONF}" 2>/dev/null | awk '{print $2}' | sort -u
 }
 
+# Returns a newline-separated list of device names currently in scst.conf.
+# Used for stale-assignment detection: if a config.json extent is absent
+# here, the WUI removed the underlying device without qle_adm being notified.
+get_scst_conf_devices() {
+    grep -E '^\s+DEVICE\s+' "${SCST_CONF}" 2>/dev/null | awk '{print $2}'
+}
+
 get_extent_by_index() {
     local idx="$1"
     get_extents_sorted | sed -n "$((idx + 1))p"
@@ -2070,6 +2077,34 @@ DROPIN
     # Non-boot sync path: write scst.conf, optionally restart or apply.
     render_scst_conf || return 1
 
+    # Warn if config.json contains assignments for extents no longer in scst.conf.
+    local stale_exts
+    stale_exts=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    scst_devs = set(line.strip() for line in open('${SCST_CONF}') if line.strip().startswith('DEVICE ')) if True else set()
+    import re
+    scst_devs = set(re.findall(r'^\s+DEVICE\s+(\S+)', open('${SCST_CONF}').read(), re.MULTILINE))
+    cfg_exts = set()
+    for ext in d.get('open_extents', []):
+        cfg_exts.add(ext)
+    for init, data in d.get('assignments', {}).items():
+        for ext in data.get('extents', []):
+            cfg_exts.add(ext)
+    for ext in sorted(cfg_exts - scst_devs):
+        print(ext)
+except: pass
+" 2>/dev/null || true)
+    if [[ -n "$stale_exts" ]]; then
+        warn "Stale assignments detected - these extents are in config.json but not in ${SCST_CONF}:"
+        while IFS= read -r ext; do
+            warn "  ${ext}"
+        done <<< "$stale_exts"
+        warn "The WUI may have removed the underlying device. Run 'unassign <extent> <wwn>' to clean up."
+        warn "Use 'list-extents' or 'list-assignments' to identify stale entries."
+    fi
+
     local port_count; port_count=$(cfg_get_list "enabled_ports" | grep -c . || true)
     if [[ "$port_count" -eq 0 ]]; then
         info "No ports enabled - bare TARGET_DRIVER block written. Use 'port enable' to add targets."
@@ -2759,10 +2794,22 @@ cmd_list_ports() {
 cmd_list_extents() {
     hdr "Available Extents"
     local open_extents; open_extents=$(cfg_get_list "open_extents")
+
+    # Build scst.conf device set once for stale detection.
+    # An extent in config.json that is absent from scst.conf was deleted
+    # via the WUI without going through qle_adm unassign.
+    local scst_devices; scst_devices=$(get_scst_conf_devices)
+
     local idx=0
     while IFS= read -r ext; do
         [[ -z "$ext" ]] && continue
         local status live_status assigned assigned_inits _parts _w _lbl
+
+        # Stale check: extent is in config.json but not in scst.conf.
+        local stale=0
+        if [[ -n "$scst_devices" ]]; then
+            echo "$scst_devices" | grep -q "^${ext}$" || stale=1
+        fi
 
         # Config-level status: [open] = in open_extents (world-accessible,
         # no initiator restriction). [assigned] = per-initiator assignment
@@ -2771,56 +2818,55 @@ cmd_list_extents() {
             && status="${GRN}[open]${NC}" \
             || status="${DIM}[assigned]${NC}"
 
-        # Live sysfs status - four states:
-        #   [no sysfs]  - not applied to running SCST, run 'sync --apply'
-        #   [mapped]    - LUN mapping in sysfs ini_group, no initiator session
-        #   [connected] - session present on target, LUN visible, no I/O yet
-        #   [active]    - session present, I/O has been issued
-        #
-        # Detection: each ini_group lun dir contains a 'device' symlink →
-        # ../../../../../../../devices/<extent-name>. Read it to confirm
-        # the extent is mapped. Then check for a session on the same target
-        # for the same initiator group. If found, check session I/O counters.
-        # Per-lun active_commands is available under session/lun<N>/.
-        local lun_found=0
-        local matched_target="" matched_lun_n="" matched_init_group=""
-        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
-            for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/[0-9]*/; do
-                [[ -L "${lun_dir}device" ]] || continue
-                local dev_target; dev_target=$(readlink -f "${lun_dir}device" 2>/dev/null || true)
-                if [[ "$(basename "$dev_target")" == "$ext" ]]; then
-                    lun_found=1
-                    # Extract target WWN, ini_group WWN, and lun number from path
-                    # Path: .../qla2x00t/<target>/ini_groups/<init_group>/luns/<N>/
-                    matched_target=$(echo "$lun_dir" | grep -oP '(?<=qla2x00t/)[^/]+')
-                    matched_init_group=$(echo "$lun_dir" | grep -oP '(?<=ini_groups/)[^/]+')
-                    matched_lun_n=$(basename "${lun_dir%/}")
-                    break
-                fi
-            done
-        fi
-
-        if [[ $lun_found -eq 0 ]]; then
-            live_status="${YLW}[no sysfs]${NC}"
+        if [[ $stale -eq 1 ]]; then
+            live_status="${YLW}[stale - not in scst.conf]${NC}"
         else
-            # Check for a session on the matched target for the matched initiator
-            local sess_path="/sys/kernel/scst_tgt/targets/qla2x00t/${matched_target}/sessions/${matched_init_group}"
-            if [[ ! -d "$sess_path" ]]; then
-                live_status="${CYN}[mapped]${NC}"
+            # Live sysfs status - four states:
+            #   [no sysfs]  - in scst.conf but not applied to running SCST, run 'sync --apply'
+            #   [mapped]    - LUN mapping in sysfs ini_group, no initiator session
+            #   [connected] - session present on target, LUN visible, no I/O yet
+            #   [active]    - session present, I/O has been issued
+            #
+            # Detection: each ini_group lun dir contains a 'device' symlink ->
+            # ../../../../../../../devices/<extent-name>. Read it to confirm
+            # the extent is mapped. Then check for a session on the same target
+            # for the same initiator group. If found, check session I/O counters.
+            # Per-lun active_commands is available under session/lun<N>/.
+            local lun_found=0
+            local matched_target="" matched_lun_n="" matched_init_group=""
+            if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+                for lun_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/ini_groups/*/luns/[0-9]*/; do
+                    [[ -L "${lun_dir}device" ]] || continue
+                    local dev_target; dev_target=$(readlink -f "${lun_dir}device" 2>/dev/null || true)
+                    if [[ "$(basename "$dev_target")" == "$ext" ]]; then
+                        lun_found=1
+                        matched_target=$(echo "$lun_dir" | grep -oP '(?<=qla2x00t/)[^/]+')
+                        matched_init_group=$(echo "$lun_dir" | grep -oP '(?<=ini_groups/)[^/]+')
+                        matched_lun_n=$(basename "${lun_dir%/}")
+                        break
+                    fi
+                done
+            fi
+
+            if [[ $lun_found -eq 0 ]]; then
+                live_status="${YLW}[no sysfs]${NC}"
             else
-                # Session exists - check I/O counters at session level
-                local rc wc rk wk ac
-                rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
-                wc=$(hex_to_dec "$(sysfs_read "${sess_path}/write_cmd_count" 2>/dev/null || echo 0)")
-                rk=$(hex_to_dec "$(sysfs_read "${sess_path}/read_io_count_kb"  2>/dev/null || echo 0)")
-                wk=$(hex_to_dec "$(sysfs_read "${sess_path}/write_io_count_kb" 2>/dev/null || echo 0)")
-                # Per-lun active_commands (commands in flight right now)
-                ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
-                local total_io=$(( rc + wc ))
-                if [[ $total_io -eq 0 ]]; then
-                    live_status="${GRN}[connected]${NC}"
+                local sess_path="/sys/kernel/scst_tgt/targets/qla2x00t/${matched_target}/sessions/${matched_init_group}"
+                if [[ ! -d "$sess_path" ]]; then
+                    live_status="${CYN}[mapped]${NC}"
                 else
-                    live_status="${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                    local rc wc rk wk ac
+                    rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
+                    wc=$(hex_to_dec "$(sysfs_read "${sess_path}/write_cmd_count" 2>/dev/null || echo 0)")
+                    rk=$(hex_to_dec "$(sysfs_read "${sess_path}/read_io_count_kb"  2>/dev/null || echo 0)")
+                    wk=$(hex_to_dec "$(sysfs_read "${sess_path}/write_io_count_kb" 2>/dev/null || echo 0)")
+                    ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
+                    local total_io=$(( rc + wc ))
+                    if [[ $total_io -eq 0 ]]; then
+                        live_status="${GRN}[connected]${NC}"
+                    else
+                        live_status="${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                    fi
                 fi
             fi
         fi
@@ -2841,7 +2887,9 @@ except: pass
                 _lbl=$(wwn_label "$_w" "initiator")
                 _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
             done
-            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
+            local stale_tag=""
+            [[ $stale -eq 1 ]] && stale_tag=" ${YLW}[run: unassign ${ext}]${NC}"
+            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")${stale_tag}"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size="" serial=""
@@ -2872,6 +2920,51 @@ else:
         echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
+
+    # Stale extents: in config.json assignments but not in scst.conf and
+    # not already shown via get_extents_sorted (which reads scst.conf).
+    local stale_extents
+    stale_extents=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    scst_devs = set('''${scst_devices}'''.split()) if '''${scst_devices}'''.strip() else set()
+    cfg_exts = set()
+    for ext in d.get('open_extents', []):
+        cfg_exts.add(ext)
+    for init, data in d.get('assignments', {}).items():
+        for ext in data.get('extents', []):
+            cfg_exts.add(ext)
+    for ext in sorted(cfg_exts - scst_devs):
+        print(ext)
+except: pass
+")
+    if [[ -n "$stale_extents" ]]; then
+        while IFS= read -r ext; do
+            [[ -z "$ext" ]] && continue
+            local assigned_inits _parts _w _lbl
+            assigned_inits=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    inits = [i for i,data in d.get('assignments',{}).items() if '${ext}' in data.get('extents',[])]
+    if inits: print(' '.join(inits))
+except: pass
+")
+            local assigned=""
+            if [[ -n "$assigned_inits" ]]; then
+                _parts=()
+                for _w in $assigned_inits; do
+                    _lbl=$(wwn_label "$_w" "initiator")
+                    _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
+                done
+                assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}") ${YLW}[run: unassign ${ext}]${NC}"
+            fi
+            echo -e "  [*] ${YLW}${ext}${NC}  ${YLW}[stale - not in scst.conf]${NC}${assigned:+  ${assigned}}"
+            idx=$((idx + 1))
+        done <<< "$stale_extents"
+    fi
+
     [[ $idx -eq 0 ]] && echo -e "  ${DIM}No extents found in ${SCST_CONF}${NC}" || true
     divider
 }
@@ -2927,6 +3020,9 @@ except: pass
 
 cmd_list_assignments() {
     hdr "LUN Assignments"
+
+    local scst_devices; scst_devices=$(get_scst_conf_devices)
+
     echo -e "\n${CYN}Open Access (all initiators):${NC}"
     local open_extents; open_extents=$(cfg_get_list "open_extents")
     if [[ -z "$open_extents" ]]; then
@@ -2935,10 +3031,15 @@ cmd_list_assignments() {
         local lun=0
         while IFS= read -r ext; do
             [[ -z "$ext" ]] && continue
-            echo -e "  LUN ${lun}: ${WHT}${ext}${NC}"
+            local stale_tag=""
+            if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
+                stale_tag="  ${YLW}[stale - not in scst.conf, run: unassign ${ext}]${NC}"
+            fi
+            echo -e "  LUN ${lun}: ${WHT}${ext}${NC}${stale_tag}"
             lun=$((lun + 1))
         done <<< "$open_extents"
     fi
+
     echo -e "\n${CYN}Per-Initiator Assignments:${NC}"
     local init_list _tmp
     _tmp=$(mktemp)
@@ -2962,16 +3063,26 @@ PYEOF
     if [[ -z "$init_list" ]]; then
         echo -e "  ${DIM}(none)${NC}"
     else
+        local stale_warned=0
         while IFS=' ' read -r init rest; do
             local lbl; lbl=$(wwn_label "$init" "initiator")
             echo -e "  ${WHT}${init}${NC} (${CYN}${lbl}${NC})"
             for pair in $rest; do
-                local lun ext
+                local lun ext stale_tag=""
                 lun="${pair%%:*}"
                 ext="${pair#*:}"
-                echo -e "    LUN ${lun}: ${ext}"
+                if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
+                    stale_tag="  ${YLW}[stale - not in scst.conf, run: unassign ${ext}]${NC}"
+                    stale_warned=1
+                fi
+                echo -e "    LUN ${lun}: ${ext}${stale_tag}"
             done
         done <<< "$init_list"
+        if [[ $stale_warned -eq 1 ]]; then
+            echo ""
+            echo -e "  ${YLW}Stale assignments exist. The extent was removed from the WUI without${NC}"
+            echo -e "  ${YLW}going through qle_adm. Run 'unassign <extent> <wwn>' to clean up.${NC}"
+        fi
     fi
     divider
 }
