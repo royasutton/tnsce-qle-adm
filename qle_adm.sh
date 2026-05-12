@@ -1464,16 +1464,19 @@ DROPIN
     }
 
     _deploy_prompt_mode() {
-        echo -e "\n  ${CYN}Select boot mode:${NC}"
-        echo -e "  ${WHT}grub${NC}      - Kernel cmdline params via TrueNAS middleware."
-        echo -e "              No module reload at boot. Firmware: HBA flash or OS dist only."
-        echo -e "  ${WHT}blacklist${NC} - Module blacklisted at boot; loaded correctly by boot entry."
-        echo -e "              Firmware: HBA, OS dist, or user-stored versions."
-        echo -e "  ${WHT}reload${NC}    - Module reloaded at every boot to apply correct params."
-        echo -e "              Firmware: HBA, OS dist, or user-stored versions."
-        echo -e "              (current default, same as previous behaviour)\n"
-        echo -en "${YLW}?${NC}  Choose mode [grub/blacklist/reload] (default: reload): "
-        local reply; read -r reply
+        # Menu and prompt must go to /dev/tty - this function is called
+        # inside $(...) so stdout is captured. Anything echo'd to stdout
+        # becomes part of new_mode; only the final selection is echo'd there.
+        echo -e "\n  ${CYN}Select boot mode:${NC}" >/dev/tty
+        echo -e "  ${WHT}grub${NC}      - Kernel cmdline params via TrueNAS middleware." >/dev/tty
+        echo -e "              No module reload at boot. Firmware: HBA flash or OS dist only." >/dev/tty
+        echo -e "  ${WHT}blacklist${NC} - Module blacklisted at boot; loaded correctly by boot entry." >/dev/tty
+        echo -e "              Firmware: HBA, OS dist, or user-stored versions." >/dev/tty
+        echo -e "  ${WHT}reload${NC}    - Module reloaded at every boot to apply correct params." >/dev/tty
+        echo -e "              Firmware: HBA, OS dist, or user-stored versions." >/dev/tty
+        echo -e "              (default, same as previous behaviour)\n" >/dev/tty
+        echo -en "${YLW}?${NC}  Choose mode [grub/blacklist/reload] (default: reload): " >/dev/tty
+        local reply; read -r reply </dev/tty
         reply="${reply:-reload}"
         case "$reply" in
             grub|blacklist|reload) echo "$reply" ;;
