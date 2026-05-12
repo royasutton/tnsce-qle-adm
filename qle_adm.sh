@@ -1073,7 +1073,12 @@ load_target_module() {
         modprobe -r qla2xxx 2>/dev/null || true
         modprobe -r qla2xxx_scst 2>/dev/null || true
         sleep 1
-        modprobe qla2xxx_scst $params
+        local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'reload')
+        if [[ "$boot_mode" == "blacklist" ]]; then
+            modprobe -i qla2xxx_scst $params
+        else
+            modprobe qla2xxx_scst $params
+        fi
         log "loaded qla2xxx_scst params=${params}"
     else
         info "[DRY-RUN] modprobe -r qla2xxx"
@@ -1499,7 +1504,7 @@ DROPIN
         echo -e "  Options:\n"
         echo -e "  ${WHT}1)${NC} Reboot now       - clean, guaranteed correct"
         echo -e "  ${WHT}2)${NC} sync --restart   - write scst.conf and restart SCST immediately"
-        echo -e "                                   (drops all active FC and iSCSI sessions)"
+        echo -e "                       (drops all active FC and iSCSI sessions)"
         echo -e "  ${WHT}3)${NC} Do nothing       - new mode takes full effect on next boot\n"
         echo -en "${YLW}?${NC}  Choose [1/2/3] (default: 3): "
         local reply; read -r reply
@@ -2064,11 +2069,11 @@ DROPIN
                     local fwbin; fwbin=$(inject_firmware "$isp_type")
                     params="${params} ql2xfwloadbin=${fwbin}"
                     if [[ $DRY_RUN -eq 0 ]]; then
-                        modprobe qla2xxx_scst $params
+                        modprobe -i qla2xxx_scst $params
                         log "boot: loaded qla2xxx_scst params=${params}"
                         ok "qla2xxx_scst loaded (blacklist mode)"
                     else
-                        info "[DRY-RUN] modprobe qla2xxx_scst ${params}"
+                        info "[DRY-RUN] modprobe -i qla2xxx_scst ${params}"
                     fi
                 fi
                 ok "Boot sync complete (blacklist mode)"
