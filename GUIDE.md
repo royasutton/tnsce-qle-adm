@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v5.0: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh`: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -96,7 +96,7 @@ you are investigating ISP2432 target mode, use `isp-params set` and
 
 ### Why ql2xfwloadbin=0 (HBA flash)
 
-The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). This is the most stable source — firmware is burned to the card by the manufacturer or a deliberate flash operation. No file needs to be present and boot is fast. Use `fw use <version>` to switch to a stored filesystem version when needed.
+The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). This is the most stable source: firmware is burned to the card by the manufacturer or a deliberate flash operation. No file needs to be present and boot is fast. Use `fw use <version>` to switch to a stored filesystem version when needed.
 
 ---
 
@@ -185,7 +185,7 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 
 The PREINIT entry is visible and manageable under
 System > Advanced > Init/Shutdown Scripts in the WUI. It is the only
-boot component that does not need restoring after a BE change or upgrade —
+boot component that does not need restoring after a BE change or upgrade;
 it lives in the TrueNAS middleware database.
 
 ### After an upgrade or boot environment change
@@ -198,7 +198,7 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 `sync --system` restores the modprobe conf, SCST ordering drop-in in `/etc`,
 and rebuilds scst.conf from config.json. `--restart` restarts SCST so the
 module reloads with correct params. The PREINIT boot entry survives all BE
-changes — no reinstall is needed.
+changes; no reinstall is needed.
 
 ---
 
@@ -297,7 +297,7 @@ All mapping commands write to both sysfs (immediate) and config.json
 
 | Command | Description |
 |---|---|
-| `sync [--apply] [--restart] [--system] [--preinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts, implies `--system`. Without any flag, scst.conf only — always safe. |
+| `sync [--apply] [--restart] [--system] [--preinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running; used by the PREINIT boot entry, never prompts, implies `--system`. Without any flag, scst.conf only; always safe. |
 | `clear <target>` | Clear accumulated state (see below) |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
@@ -485,7 +485,7 @@ After any BE change or upgrade:
 |---|---|
 | `0` | HBA primary flash slot (default) |
 | `1` | Optrom slot (secondary flash) |
-| `2` | Filesystem — `/usr/lib/firmware/<fw_file>` |
+| `2` | Filesystem - `/usr/lib/firmware/<fw_file>` |
 
 The default is `hba` (`ql2xfwloadbin=0`). When a stored version is selected via `fw use`, qle_adm copies the firmware file directly to `/usr/lib/firmware/` at boot and sets `ql2xfwloadbin=2`. The file persists within the boot environment; a BE upgrade restores the TrueNAS original naturally.
 
@@ -640,7 +640,7 @@ never been started or its installation is incomplete.
 
 > **WARNING:** At least one iSCSI target must be defined in the TrueNAS iSCSI
 > WUI (Sharing → iSCSI → Targets) for `/etc/scst.conf` to be created. The
-> target name does not matter — its mere existence triggers the file. Without
+> target name does not matter; its mere existence triggers the file. Without
 > any iSCSI target defined, SCST starts but does not write `scst.conf`, and
 > `qle_adm.sh sync` will fail with "scst.conf not found".
 
@@ -736,7 +736,7 @@ restart SCST on iSCSI saves, so active sessions are unaffected.
 `/etc/scst.conf` is created by TrueNAS when it saves iSCSI configuration. If
 no iSCSI targets have ever been defined in the WUI (Sharing → iSCSI → Targets),
 TrueNAS never writes the file. At least one iSCSI target must exist for
-`scst.conf` to be created — the target name and configuration do not matter,
+`scst.conf` to be created - the target name and configuration do not matter,
 its existence is the trigger. Create a placeholder iSCSI target in the WUI,
 save, and `scst.conf` will appear. Then run `sync` to add the FC target block.
 
@@ -754,7 +754,7 @@ for direct (switchless) ISP2532 target operation.
 
 **Q: What is the default firmware source and when should I change it?**
 
-The default is `hba` (`ql2xfwloadbin=0`) — firmware loads from the HBA
+The default is `hba` (`ql2xfwloadbin=0`): firmware loads from the HBA
 primary flash slot. This is the most stable and conservative choice. Use
 `fw show` to compare running, optrom, and any stored versions. To use a
 different firmware version: run `fw save-os` to capture the OS dist
@@ -776,20 +776,20 @@ to active sessions.
 
 **Boot sequence (normal boot):**
 
-1. Kernel boots — `qla2xxx_scst` autoloads from initramfs at ~3s with
+1. Kernel boots: `qla2xxx_scst` autoloads from initramfs at ~3s with
    compiled-in default params. `/etc` is not yet mounted at this point.
 2. systemd starts, `/etc` ZFS dataset mounts (~18s)
-3. **PREINIT** runs `sync --preinit` — writes modprobe conf and scst.conf
+3. **PREINIT** runs `sync --preinit` - writes modprobe conf and scst.conf
    to `/etc`, writes the SCST ordering drop-in, then unloads and reloads
    `qla2xxx_scst` with correct params. SCST is guaranteed not running at
    PREINIT time because the drop-in adds `After=ix-preinit.service` to
    `scst.service`, so systemd waits for PREINIT to complete first.
-4. SCST starts — finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
+4. SCST starts - finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
    registers successfully, reads scst.conf and initializes FC targets
 
 **After a BE change:** The modprobe conf, scst.conf, and the SCST ordering
 drop-in are all in `/etc` which is BE-specific. On the first boot after a
-BE change all three are absent. SCST and PREINIT race — SCST may win and
+BE change all three are absent. SCST and PREINIT race; SCST may win and
 fail. Run `sync --system` then `sync --restart` to recover. PREINIT then
 restores all three files for all subsequent boots.
 
