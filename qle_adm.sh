@@ -2298,7 +2298,7 @@ except: pass
                 _lbl=$(wwn_label "$_w" "initiator")
                 _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
             done
-            assigned="${DIM}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
+            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size="" serial=""
@@ -2318,24 +2318,13 @@ else:
     print(f'{kib:6.2f} KiB')
 " 2>/dev/null || echo "${size_mb_raw} MB")
             fi
-            # Resolve backing block device serial via udevadm (works for zvols
-            # and physical disks). Fallback to sysfs device/serial for bare disks.
-            local backing_dev; backing_dev=$(sysfs_read "${dev_path}/filename" 2>/dev/null || echo "")
-            if [[ -n "$backing_dev" ]]; then
-                local blkname; blkname=$(basename "$backing_dev")
-                local udev_serial; udev_serial=$(udevadm info --query=property \
-                    --name="$backing_dev" 2>/dev/null \
-                    | grep -E '^(ID_SERIAL_SHORT|ID_SERIAL)=' \
-                    | head -1 | cut -d= -f2- || echo "")
-                if [[ -n "$udev_serial" ]]; then
-                    serial="${DIM}s/n:${udev_serial}${NC}"
-                else
-                    local sysfs_serial; sysfs_serial=$(cat \
-                        "/sys/block/${blkname}/device/serial" 2>/dev/null \
-                        | tr -d ' ' || echo "")
-                    [[ -n "$sysfs_serial" ]] && serial="${DIM}s/n:${sysfs_serial}${NC}"
-                fi
-            fi
+            # Read the SCSI Unit Serial Number (USN) directly from SCST sysfs.
+            # This is the serial the initiator sees via INQUIRY page 0x80,
+            # and is always present when the device is registered. Avoids
+            # probing udevadm which has no serial data for zvols.
+            local usn; usn=$(sysfs_read "${dev_path}/usn" 2>/dev/null || echo "")
+            usn="${usn%\[key\]}"
+            [[ -n "$usn" ]] && serial="${CYN}s/n:${NC} ${DIM}${usn}${NC}"
         fi
         echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}"
         idx=$((idx + 1))
