@@ -37,7 +37,7 @@ TrueNAS SCALE CE
     ├── config.json  (${QLE_ADM_HOME}/) ← single source of truth
     ├── /etc/scst.conf                  ← rebuilt at boot and on sync
     ├── /etc/modprobe.d/                ← module params (restored by boot entry)
-    └── TrueNAS middleware DB           ← PREINIT boot entry (survives BE changes)
+    └── TrueNAS middleware DB           ← boot entry (survives BE changes)
 ```
 
 ### Configuration model
@@ -148,8 +148,8 @@ mkdir -p ${QLE_ADM_HOME}
 cp qle_adm.sh ${QLE_ADM_HOME}/
 chmod +x ${QLE_ADM_HOME}/qle_adm.sh
 
-# Run install - registers PREINIT boot entry and writes modprobe config
-${QLE_ADM_HOME}/qle_adm.sh --yes install
+# Run install - registers boot entry and writes /etc artefacts
+${QLE_ADM_HOME}/qle_adm.sh --yes deploy install --mode grub
 
 # Add to your shell startup script (~/.bashrc or ~/.zshrc) so qle_adm.sh
 # is available by name from any directory on this and future sessions.
@@ -165,7 +165,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 ${QLE_ADM_HOME}/qle_adm.sh sync
 
 # If qla2xxx_scst is not yet loaded for this session, load it now.
-# On subsequent boots PREINIT handles the module lifecycle automatically.
+# On subsequent boots the boot entry handles the module lifecycle automatically.
 ${QLE_ADM_HOME}/qle_adm.sh module load
 
 # Verify - confirm no gaps before proceeding
@@ -262,14 +262,14 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Short | Description |
 |---|---|---|
-| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats |
-| `status` | `st` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `status` | `st` |
+| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-assignments` | `la` | Per-initiator LUN mappings |
-| `list-all` | `ll` | All five list commands in sequence |
+| `list-all` | `ll` | All list commands in sequence |
 
 ### Port management
 
@@ -433,8 +433,10 @@ authoritative source for param drift detection.
 
 | Command | Description |
 |---|---|
-| `install` | Register PREINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
-| `uninstall` | Remove all installed components, preserve config.json |
+| `deploy install [--mode M]` | Register boot entry, write /etc artefacts, copy script to QLE_ADM_HOME. Modes: grub (default), blacklist, reload |
+| `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
+| `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new |
+| `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
 
 ---
 
@@ -523,7 +525,7 @@ echo s2idle > /etc/systemd/sleep.conf.d/mem.conf
 | `config.json` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | `qle_adm.sh` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | Firmware store on `/mnt` | ✓ | ✓ | ✓ | N/A |
-| TrueNAS middleware PREINIT entry | ✓ | ✓ | ✓ | N/A |
+| TrueNAS middleware boot entry | ✓ | ✓ | ✓ | N/A |
 | `/etc/modprobe.d/` | ✓ | ✗ | ✗ | `sync --boot` |
 | `/etc/scst.conf` FC block | ✓ | ✗ | ✗ | `sync` |
 | SCST sysfs state | ✗ | ✗ | ✗ | automatic via scst.conf on boot |
@@ -713,7 +715,7 @@ systemctl start scst
 
 ### Targets not active after upgrade or BE change
 
-The PREINIT boot entry survives the upgrade and will have run automatically.
+The boot entry survives the upgrade and will have run automatically.
 If targets are still not active, the modprobe config or scst.conf block may
 need restoring:
 
@@ -885,7 +887,7 @@ only needed in specific situations:
 - When SCST needs to re-read the updated scst.conf: `sync --restart`
 - After an upgrade or BE change and SCST needs restarting: `sync --restart`
 
-The PREINIT boot entry never needs restoring - it lives in the TrueNAS
+The boot entry never needs restoring - it lives in the TrueNAS
 middleware database and survives all BE changes and upgrades.
 
 Running `sync` at any other time is harmless - it rebuilds scst.conf from
@@ -981,7 +983,9 @@ but SCST does not re-read it until the next restart.
     "aa:bb:cc:dd:ee:ff:00:10": {"name": "workstation", "role": "initiator", "port": 0}
   },
   "firmware": {},
-  "initscript_preinit_id": 3
+  "initscript_preinit_id": 3,
+  "boot_mode": "grub",
+  "rootwait_was_preexisting": false
 }
 ```
 
@@ -995,7 +999,9 @@ but SCST does not re-read it until the next restart.
 | `isp_active_profile` | Currently selected profile per ISP type |
 | `wwn_names` | Friendly names, roles, and port indices for WWNs |
 | `firmware` | Reserved for firmware metadata |
-| `initscript_preinit_id` | TrueNAS middleware id of the registered PREINIT boot entry. Used by `uninstall` to remove the entry without a comment search. |
+| `initscript_preinit_id` | TrueNAS middleware id of the registered boot entry. Used by `deploy uninstall` to remove the entry without a comment search. |
+| `boot_mode` | Active boot mode: `grub` (default), `blacklist`, or `reload` |
+| `rootwait_was_preexisting` | Whether `rootwait` was in `kernel_extra_options` before qle_adm added it. Controls whether `rootwait` is removed on uninstall. |
 
 ---
 

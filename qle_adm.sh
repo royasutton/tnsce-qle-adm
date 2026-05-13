@@ -4320,10 +4320,10 @@ if '${profile}' in entry:
 usage() {
     hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
-Status       : stats  [--watch] [--wide]
-               status
+Status       : status
+               stats  [--watch] [--wide]
                list-hba  list-ports  list-initiators  list-extents  list-assignments  list-all
-               shortcuts: sw  si  st  lh  lp  li  le  la  ll
+               shortcuts: st  sw  si  lh  lp  li  le  la  ll
 
 Port         : port  enable | disable  <wwn> | --port N
 

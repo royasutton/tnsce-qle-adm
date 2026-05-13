@@ -34,8 +34,8 @@ changed later with `deploy reconfigure`. The active mode is stored in
 
 | Mode | How params are applied | Module reload at boot | Firmware sources |
 |------|------------------------|----------------------|-----------------|
-| `reload` | PREINIT unloads and reloads `qla2xxx_scst` with correct params | Yes | HBA flash, OS dist, user-stored |
-| `blacklist` | Module blacklisted at boot; PREINIT performs the first clean load | No | HBA flash, OS dist, user-stored |
+| `reload` | Boot entry unloads and reloads `qla2xxx_scst` with correct params | Yes | HBA flash, OS dist, user-stored |
+| `blacklist` | Module blacklisted at boot; boot entry performs the first clean load | No | HBA flash, OS dist, user-stored |
 | `grub` | Params delivered as `qla2xxx_scst.<param>=<val>` kernel cmdline tokens via TrueNAS middleware | No | HBA flash or OS dist only |
 
 **`grub`** is the default for new installs. **`reload`** matches the behaviour of all
