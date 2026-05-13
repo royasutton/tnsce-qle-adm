@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh` v4.1: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh`: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -36,8 +36,8 @@ TrueNAS SCALE CE
 └── qle_adm.sh
     ├── config.json  (${QLE_ADM_HOME}/) ← single source of truth
     ├── /etc/scst.conf                  ← rebuilt at boot and on sync
-    ├── /etc/modprobe.d/                ← module params (restored by sync --system)
-    └── TrueNAS middleware DB           ← PREINIT boot entry (survives BE changes)
+    ├── /etc/modprobe.d/                ← module params (restored by boot entry)
+    └── TrueNAS middleware DB           ← boot entry (survives BE changes)
 ```
 
 ### Configuration model
@@ -96,7 +96,7 @@ you are investigating ISP2432 target mode, use `isp-params set` and
 
 ### Why ql2xfwloadbin=0 (HBA flash)
 
-The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). This is the most stable source — firmware is burned to the card by the manufacturer or a deliberate flash operation. No file needs to be present and boot is fast. Use `fw use <version>` to switch to a stored filesystem version when needed.
+The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). This is the most stable source: firmware is burned to the card by the manufacturer or a deliberate flash operation. No file needs to be present and boot is fast. Use `fw use <version>` to switch to a stored filesystem version when needed.
 
 ---
 
@@ -148,8 +148,8 @@ mkdir -p ${QLE_ADM_HOME}
 cp qle_adm.sh ${QLE_ADM_HOME}/
 chmod +x ${QLE_ADM_HOME}/qle_adm.sh
 
-# Run install - registers PREINIT boot entry and writes modprobe config
-${QLE_ADM_HOME}/qle_adm.sh --yes install
+# Run install - registers boot entry and writes /etc artefacts
+${QLE_ADM_HOME}/qle_adm.sh --yes deploy install --mode grub
 
 # Add to your shell startup script (~/.bashrc or ~/.zshrc) so qle_adm.sh
 # is available by name from any directory on this and future sessions.
@@ -165,7 +165,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 ${QLE_ADM_HOME}/qle_adm.sh sync
 
 # If qla2xxx_scst is not yet loaded for this session, load it now.
-# On subsequent boots PREINIT handles the module lifecycle automatically.
+# On subsequent boots the boot entry handles the module lifecycle automatically.
 ${QLE_ADM_HOME}/qle_adm.sh module load
 
 # Verify - confirm no gaps before proceeding
@@ -179,26 +179,45 @@ ${QLE_ADM_HOME}/qle_adm.sh status
 | `${QLE_ADM_HOME}/qle_adm.sh` | Main script | ✓ |
 | `${QLE_ADM_HOME}/config.json` | Persistent config | ✓ |
 | `${QLE_ADM_HOME}/firmware/` | Firmware store | ✓ |
-| `/etc/modprobe.d/qla2xxx_scst.conf` | Module params | ✗ restored by PREINIT |
-| `/etc/systemd/system/scst.service.d/qle-adm-ordering.conf` | SCST starts after PREINIT | ✗ restored by PREINIT |
-| TrueNAS middleware PREINIT entry | Module reload before SCST starts | ✓ survives all BE changes |
+| `/etc/modprobe.d/qla2xxx_scst.conf` | Module params (reload/blacklist modes) | ✗ restored by boot entry |
+| `/etc/systemd/system/scst.service.d/qle-adm-ordering.conf` | SCST starts after boot entry | ✗ restored by boot entry |
+| TrueNAS middleware boot entry | Boot-time module management and scst.conf write | ✓ survives all BE changes |
 
-The PREINIT entry is visible and manageable under
+The boot entry is visible and manageable under
 System > Advanced > Init/Shutdown Scripts in the WUI. It is the only
-boot component that does not need restoring after a BE change or upgrade —
+boot component that does not need restoring after a BE change or upgrade;
 it lives in the TrueNAS middleware database.
+
+### Boot modes
+
+`qle_adm.sh` supports three boot modes, selected at `deploy install` time
+or changed later with `deploy reconfigure`. The active mode is stored in
+`config.json`. **`grub` is the default for new installs.**
+
+| Mode | How params are applied | Module reload at boot | Firmware sources |
+|------|------------------------|----------------------|-----------------|
+| `grub` | Params as `qla2xxx_scst.<k>=<v>` tokens in `kernel_extra_options` via TrueNAS middleware | No | HBA flash or OS dist |
+| `blacklist` | Module blacklisted at boot; boot entry performs the first clean load with `modprobe -i` | No | HBA, OS dist, user-stored |
+| `reload` | Boot entry unloads and reloads module with correct params | Yes | HBA, OS dist, user-stored |
+
+Switch modes at any time:
+
+```bash
+qle_adm.sh deploy reconfigure --mode grub
+qle_adm.sh deploy status
+```
 
 ### After an upgrade or boot environment change
 
 ```bash
-${QLE_ADM_HOME}/qle_adm.sh sync --system --restart
+${QLE_ADM_HOME}/qle_adm.sh sync --restart
 ${QLE_ADM_HOME}/qle_adm.sh status
 ```
 
-`sync --system` restores the modprobe conf, SCST ordering drop-in in `/etc`,
-and rebuilds scst.conf from config.json. `--restart` restarts SCST so the
-module reloads with correct params. The PREINIT boot entry survives all BE
-changes — no reinstall is needed.
+`sync --restart` rebuilds scst.conf from config.json and restarts SCST.
+The boot entry survives all BE changes; no reinstall is needed. On the
+first boot after a BE change the boot entry restores all `/etc` artefacts
+before SCST starts and the boot is fully automatic from the second boot on.
 
 ---
 
@@ -243,29 +262,14 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Short | Description |
 |---|---|---|
-| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats |
-| `status` | `st` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `status` | `st` |
+| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
-| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
+| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-assignments` | `la` | Per-initiator LUN mappings |
-| `list-all` | `ll` | All five list commands in sequence |
-
-### Log management
-
-Boot sessions are delimited in the log by `=== PREINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
-
-| Command | Description |
-|---|---|
-| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
-| `log boot` | Current boot session (from last marker to end of log) |
-| `log last [N]` | Previous N boot sessions for comparison (default 1) |
-| `log clear` | Truncate log file - confirms before clearing |
-| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
-| `log grep <pattern>` | Filter log by pattern |
-| `log path` | Print log file path |
-| `log status` | Size, line count, session count, oldest/newest entry |
+| `list-all` | `ll` | All list commands in sequence |
 
 ### Port management
 
@@ -293,22 +297,72 @@ Writes to both sysfs (immediate) and config.json (persistent).
 All mapping commands write to both sysfs (immediate) and config.json
 (persistent). No separate save step is required.
 
+### Deferred LUN number changes
+
+LUN numbers can be changed without disrupting live sessions by staging
+the change into `pending_luns` in `config.json`. The change is only
+applied when `sync --restart` or `sync --apply` is run, or on next reboot.
+Multiple changes can be staged and are validated as a unit at apply time.
+
+```
+lun set <extent> <wwn> <new-lun>
+    Stage a LUN number change for an extent/initiator pair. Does not
+    touch live sysfs. Setting the current live LUN number cancels any
+    pending change for that extent. Each call prints the current pending
+    state and a READY / NOT READY indicator.
+
+lun clear-pending <wwn>
+    Clear all pending LUN changes for a specific initiator.
+
+lun clear-pending --all
+    Clear all pending LUN changes across all initiators.
+
+lun status [<wwn>]
+    Show pending changes and the merged desired LUN map with conflict
+    detection. Reports READY (no conflicts) or NOT READY with details.
+```
+
+Conflict detection runs at apply time (`sync --restart` or `sync --apply`).
+If the merged map contains duplicate LUN numbers, the entire pending set
+is rejected and nothing is written. Resolve with further `lun set` calls
+then re-run `sync --restart`.
+
+Example - swap LUN 0 and LUN 1 for an initiator without session disruption
+until the restart:
+
+```bash
+qle_adm.sh lun set g1ed2-debian  51:40:2e:c0:01:7c:6f:1c 1
+qle_adm.sh lun set g1ed2-truenas 51:40:2e:c0:01:7c:6f:1c 0
+qle_adm.sh lun status
+qle_adm.sh sync --restart
+```
+
+### WWN naming
+
+```bash
+./qle_adm.sh name list
+./qle_adm.sh name set <wwn> <name> [--port N]
+./qle_adm.sh name get <wwn>
+./qle_adm.sh name del <wwn>
+```
+
 ### Operation
 
 | Command | Description |
 |---|---|
-| `sync [--apply] [--restart] [--system] [--preinit]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--system` writes/restores the modprobe conf and SCST ordering drop-in in `/etc`; implied by `--preinit`. `--preinit` writes `/etc` files then reloads `qla2xxx_scst` with correct params while SCST is not running — used by the PREINIT boot entry, never prompts, implies `--system`. Without any flag, scst.conf only — always safe. |
-| `clear <target>` | Clear accumulated state (see below) |
+| `sync [--apply] [--restart] [--boot]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--boot` writes `/etc` artefacts, rebuilds scst.conf, and manages the module per boot_mode; used by the boot entry, never prompts. Without any flag, scst.conf only; always safe. |
+| `reset <target>` | Reset accumulated state (see below) |
+| `lun <set\|clear-pending\|status>` | Stage deferred LUN number changes (see below) |
 | `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
 | `teardown` | Deactivate targets, revert to plain initiator mode |
 
-**clear targets:**
+**reset targets:**
 ```
-clear seen       : wipe seen_initiators history
-clear ports      : disable all ports and clear enabled_ports
-clear mappings   : remove all open/assigned LUNs from sysfs and config
-clear names      : wipe all WWN names
-clear all        : all of the above (prompts unless --yes)
+reset seen       : wipe seen_initiators history
+reset ports      : disable all ports and clear enabled_ports
+reset mappings   : remove all open/assigned LUNs from sysfs and config
+reset names      : wipe all WWN names
+reset all        : all of the above (prompts unless --yes)
 ```
 
 ### Module management
@@ -347,19 +401,10 @@ authoritative source for param drift detection.
 
 | Command | Replacement |
 |---|---|
-| `setup [--preinit]` | `sync [--preinit]` |
+| `setup [--preinit]` | `sync [--boot]` |
 | `apply` | Not needed - all changes write atomically to config.json + sysfs |
 | `save` | Not needed - seen_initiators captured automatically by `status` and `list-initiators` |
 | `repair` | `sync` |
-
-### WWN naming
-
-```bash
-./qle_adm.sh name list
-./qle_adm.sh name set <wwn> <name> [--port N]
-./qle_adm.sh name get <wwn>
-./qle_adm.sh name del <wwn>
-```
 
 ### ISP parameter profiles
 
@@ -388,10 +433,27 @@ authoritative source for param drift detection.
 
 | Command | Description |
 |---|---|
-| `install` | Register PREINIT boot entry in TrueNAS middleware DB, write modprobe config, copy script to QLE_ADM_HOME |
-| `uninstall` | Remove all installed components, preserve config.json |
+| `deploy install [--mode M]` | Register boot entry, write /etc artefacts, copy script to QLE_ADM_HOME. Modes: grub (default), blacklist, reload |
+| `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
+| `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new |
+| `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
 
 ---
+
+### Log management
+
+Boot sessions are delimited in the log by `=== Boot sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use this marker to identify session boundaries.
+
+| Command | Description |
+|---|---|
+| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
+| `log boot` | Current boot session (from last marker to end of log) |
+| `log last [N]` | Previous N boot sessions for comparison (default 1) |
+| `log clear` | Truncate log file - confirms before clearing |
+| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
+| `log grep <pattern>` | Filter log by pattern |
+| `log path` | Print log file path |
+| `log status` | Size, line count, session count, oldest/newest entry |
 
 ## Initiator Setup
 
@@ -463,15 +525,15 @@ echo s2idle > /etc/systemd/sleep.conf.d/mem.conf
 | `config.json` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | `qle_adm.sh` on `/mnt` | ✓ | ✓ | ✓ | N/A |
 | Firmware store on `/mnt` | ✓ | ✓ | ✓ | N/A |
-| TrueNAS middleware PREINIT entry | ✓ | ✓ | ✓ | N/A |
-| `/etc/modprobe.d/` | ✓ | ✗ | ✗ | `sync --system` |
+| TrueNAS middleware boot entry | ✓ | ✓ | ✓ | N/A |
+| `/etc/modprobe.d/` | ✓ | ✗ | ✗ | `sync --boot` |
 | `/etc/scst.conf` FC block | ✓ | ✗ | ✗ | `sync` |
 | SCST sysfs state | ✗ | ✗ | ✗ | automatic via scst.conf on boot |
 | Active FC sessions | ✗ | ✗ | ✗ | automatic on reconnect |
 
 After any BE change or upgrade:
 ```bash
-./qle_adm.sh sync --system --restart
+./qle_adm.sh sync --restart
 ./qle_adm.sh status
 ```
 
@@ -485,7 +547,7 @@ After any BE change or upgrade:
 |---|---|
 | `0` | HBA primary flash slot (default) |
 | `1` | Optrom slot (secondary flash) |
-| `2` | Filesystem — `/usr/lib/firmware/<fw_file>` |
+| `2` | Filesystem - `/usr/lib/firmware/<fw_file>` |
 
 The default is `hba` (`ql2xfwloadbin=0`). When a stored version is selected via `fw use`, qle_adm copies the firmware file directly to `/usr/lib/firmware/` at boot and sets `ql2xfwloadbin=2`. The file persists within the boot environment; a BE upgrade restores the TrueNAS original naturally.
 
@@ -519,7 +581,7 @@ When two sources produce the same version string but differ in content (SHA256 m
 # See all stored versions
 ./qle_adm.sh fw list
 
-# Switch to a stored version (takes effect on next boot or sync --system)
+# Switch to a stored version (takes effect on next boot or reboot)
 ./qle_adm.sh fw use 8.08.207
 
 # Switch back to HBA flash
@@ -551,7 +613,7 @@ The driver only exposes the optrom slot version via sysfs (`optrom_fw_version`).
 ## ISP Parameter Profiles
 
 Each ISP type has a set of named parameter profiles stored in `config.json`.
-One profile is marked active (`*`) and used by `sync --preinit`. Multiple
+One profile is marked active (`*`) and used by the boot entry (sync --boot). Multiple
 profiles allow switching between configurations without editing the config.
 
 ```bash
@@ -566,7 +628,7 @@ profiles allow switching between configurations without editing the config.
 #     Applied    : default
 ```
 
-**Configured:** the active profile that will be loaded on next `sync --preinit`.
+**Configured:** the active profile that will be loaded on next `sync --boot` or reboot.
 **Applied:** the params actually running in the kernel right now.
 **drift:** applied and configured differ; reload the module to resync.
 
@@ -640,7 +702,7 @@ never been started or its installation is incomplete.
 
 > **WARNING:** At least one iSCSI target must be defined in the TrueNAS iSCSI
 > WUI (Sharing → iSCSI → Targets) for `/etc/scst.conf` to be created. The
-> target name does not matter — its mere existence triggers the file. Without
+> target name does not matter; its mere existence triggers the file. Without
 > any iSCSI target defined, SCST starts but does not write `scst.conf`, and
 > `qle_adm.sh sync` will fail with "scst.conf not found".
 
@@ -653,12 +715,12 @@ systemctl start scst
 
 ### Targets not active after upgrade or BE change
 
-The PREINIT boot entry survives the upgrade and will have run automatically.
+The boot entry survives the upgrade and will have run automatically.
 If targets are still not active, the modprobe config or scst.conf block may
 need restoring:
 
 ```bash
-./qle_adm.sh sync --system --restart
+./qle_adm.sh sync --restart
 ./qle_adm.sh status
 ```
 
@@ -736,7 +798,7 @@ restart SCST on iSCSI saves, so active sessions are unaffected.
 `/etc/scst.conf` is created by TrueNAS when it saves iSCSI configuration. If
 no iSCSI targets have ever been defined in the WUI (Sharing → iSCSI → Targets),
 TrueNAS never writes the file. At least one iSCSI target must exist for
-`scst.conf` to be created — the target name and configuration do not matter,
+`scst.conf` to be created - the target name and configuration do not matter,
 its existence is the trigger. Create a placeholder iSCSI target in the WUI,
 save, and `scst.conf` will appear. Then run `sync` to add the FC target block.
 
@@ -754,13 +816,13 @@ for direct (switchless) ISP2532 target operation.
 
 **Q: What is the default firmware source and when should I change it?**
 
-The default is `hba` (`ql2xfwloadbin=0`) — firmware loads from the HBA
+The default is `hba` (`ql2xfwloadbin=0`): firmware loads from the HBA
 primary flash slot. This is the most stable and conservative choice. Use
 `fw show` to compare running, optrom, and any stored versions. To use a
 different firmware version: run `fw save-os` to capture the OS dist
 firmware and `fw save-hba` to capture the optrom firmware into the versioned
 store, then `fw use <version>` to select one. Takes effect on next boot or
-`sync --system`.
+`sync --boot`.
 
 ---
 
@@ -774,24 +836,43 @@ and sysfs writes, and no brief window where a target port is enabled but LUNs
 are not yet mapped. Runtime changes continue through sysfs for zero disruption
 to active sessions.
 
-**Boot sequence (normal boot):**
+**Boot sequence (normal boot, grub mode - default):**
 
-1. Kernel boots — `qla2xxx_scst` autoloads from initramfs at ~3s with
-   compiled-in default params. `/etc` is not yet mounted at this point.
+1. Kernel boots: `qla2xxx_scst` autoloads from initramfs at ~3s with
+   params delivered via `kernel_extra_options` cmdline tokens. No reload needed.
 2. systemd starts, `/etc` ZFS dataset mounts (~18s)
-3. **PREINIT** runs `sync --preinit` — writes modprobe conf and scst.conf
-   to `/etc`, writes the SCST ordering drop-in, then unloads and reloads
-   `qla2xxx_scst` with correct params. SCST is guaranteed not running at
-   PREINIT time because the drop-in adds `After=ix-preinit.service` to
-   `scst.service`, so systemd waits for PREINIT to complete first.
-4. SCST starts — finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
-   registers successfully, reads scst.conf and initializes FC targets
+3. **Boot entry** runs `sync --boot` - writes scst.conf and SCST ordering
+   drop-in to `/etc`. No module management (params already applied via cmdline).
+   SCST is guaranteed not running at this point because the drop-in adds
+   `After=ix-preinit.service` to `scst.service`.
+4. SCST starts - finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
+   registers successfully, reads scst.conf and initializes FC targets.
+
+**Boot sequence (blacklist mode):**
+
+1. Kernel boots: `module_blacklist=qla2xxx_scst` in cmdline prevents autoload.
+2. systemd starts, `/etc` ZFS dataset mounts.
+3. **Boot entry** runs `sync --boot` - writes modprobe conf, scst.conf, and
+   SCST ordering drop-in to `/etc`. Loads `qla2xxx_scst` with `modprobe -i`
+   (ignore-blacklist) and correct params for the first and only time.
+4. SCST starts - finds module loaded, `qla2x00t` registers, reads scst.conf.
+
+**Boot sequence (reload mode):**
+
+1. Kernel boots: `qla2xxx_scst` autoloads from initramfs at ~3s with default
+   compiled-in params. `/etc` is not yet mounted at this point.
+2. systemd starts, `/etc` ZFS dataset mounts (~18s).
+3. **Boot entry** runs `sync --boot` - writes modprobe conf, scst.conf, and
+   SCST ordering drop-in to `/etc`, then unloads and reloads `qla2xxx_scst`
+   with correct params. SCST is guaranteed not running at this point.
+4. SCST starts - finds `qla2xxx_scst` loaded with correct params, `qla2x00t`
+   registers successfully, reads scst.conf and initializes FC targets.
 
 **After a BE change:** The modprobe conf, scst.conf, and the SCST ordering
 drop-in are all in `/etc` which is BE-specific. On the first boot after a
-BE change all three are absent. SCST and PREINIT race — SCST may win and
-fail. Run `sync --system` then `sync --restart` to recover. PREINIT then
-restores all three files for all subsequent boots.
+BE change all three are absent. SCST and the boot entry race; SCST may win
+and fail. Run `sync --restart` to recover. The boot entry then restores all
+three files for all subsequent boots.
 
 ---
 
@@ -802,11 +883,11 @@ No. All change commands (`port enable/disable`, `open`, `close`, `assign`,
 only needed in specific situations:
 
 - After a WUI iSCSI save wiped the scst.conf FC block: `sync`
-- After an upgrade or BE change wiped the modprobe config: `sync --system`
+- After an upgrade or BE change wiped the modprobe config: `sync --boot`
 - When SCST needs to re-read the updated scst.conf: `sync --restart`
-- After an upgrade or BE change and SCST needs restarting: `sync --system --restart`
+- After an upgrade or BE change and SCST needs restarting: `sync --restart`
 
-The PREINIT boot entry never needs restoring - it lives in the TrueNAS
+The boot entry never needs restoring - it lives in the TrueNAS
 middleware database and survives all BE changes and upgrades.
 
 Running `sync` at any other time is harmless - it rebuilds scst.conf from
@@ -902,7 +983,9 @@ but SCST does not re-read it until the next restart.
     "aa:bb:cc:dd:ee:ff:00:10": {"name": "workstation", "role": "initiator", "port": 0}
   },
   "firmware": {},
-  "initscript_preinit_id": 3
+  "initscript_preinit_id": 3,
+  "boot_mode": "grub",
+  "rootwait_was_preexisting": false
 }
 ```
 
@@ -916,7 +999,9 @@ but SCST does not re-read it until the next restart.
 | `isp_active_profile` | Currently selected profile per ISP type |
 | `wwn_names` | Friendly names, roles, and port indices for WWNs |
 | `firmware` | Reserved for firmware metadata |
-| `initscript_preinit_id` | TrueNAS middleware id of the registered PREINIT boot entry. Used by `uninstall` to remove the entry without a comment search. |
+| `initscript_preinit_id` | TrueNAS middleware id of the registered boot entry. Used by `deploy uninstall` to remove the entry without a comment search. |
+| `boot_mode` | Active boot mode: `grub` (default), `blacklist`, or `reload` |
+| `rootwait_was_preexisting` | Whether `rootwait` was in `kernel_extra_options` before qle_adm added it. Controls whether `rootwait` is removed on uninstall. |
 
 ---
 
