@@ -4309,17 +4309,10 @@ if '${profile}' in entry:
 usage() {
     hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
-Status       : stats  [--watch] [--wide]        sw  si
-               status                            st
-               list-hba                          lh
-               list-ports                        lp
-               list-extents                      le
-               list-initiators                   li
-               list-assignments                  la
-               list-all                          ll
-
-Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
-                    grep <pattern> | path | status
+Status       : stats  [--watch] [--wide]
+               status
+               list-hba  list-ports  list-initiators  list-extents  list-assignments  list-all
+               shortcuts: sw  si  st  lh  lp  li  le  la  ll
 
 Port         : port  enable | disable  <wwn> | --port N
 
@@ -4328,19 +4321,23 @@ LUN Mapping  : open     <extent> | --ext N
                assign   <extent> | --ext N  <wwn> | --init N  [lun]
                unassign <extent> | --ext N  <wwn> | --init N
 
-Operation    : sync [--apply] [--restart] [--boot]
-               reset  seen | ports | mappings | names | all
-               lun    set | clear-pending | status
-               module  load | unload | reload | status
-               teardown
+LUN Staging  : lun  set | clear-pending | status
 
 WWN Names    : name  list | set | get | del
+
+Operation    : sync [--apply] [--restart] [--boot]
+               reset  seen | ports | mappings | names | all
+               module  load | unload | reload | status
+               teardown
 
 Config       : isp-params  list | set | use | del
 
 Firmware     : fw  list | save-os | save-hba | add | remove | use | show | status
 
 Deployment   : deploy  install | uninstall | reconfigure | status
+
+Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
+                    grep <pattern> | path | status
 
 Global       : examples  help  version
                --port N   --init N   --ext N
@@ -4357,14 +4354,45 @@ cmd_help() {
 ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before use:
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes deploy install
 
-${CYN}Deployment:${NC}
-  deploy install [--mode M]      Install: register boot entry, write /etc artefacts,
-                                 copy script to QLE_ADM_HOME. Modes: grub, blacklist,
-                                 grub (default). Prompts if --mode not given.
-  deploy uninstall               Remove all installed components and kernel cmdline tokens
-  deploy reconfigure [--mode M]  Switch boot mode. Tears down old artefacts, installs new.
-                                 Offers reboot / sync --restart / defer after change.
-  deploy status                  Show active mode and artefact state with gap analysis
+${CYN}Status:${NC}
+  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s    (sw / si)
+  status                         Full state: modules, ports, sessions, gap analysis.  (st)
+                                 Passively captures seen_initiators from active sessions.
+  list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN    (lh)
+  list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
+  list-initiators                Connected initiators with IO stats; seen history always shown  (li)
+  list-extents                   SCST extents with size, config state, serial number,  (le)
+                                 and live sysfs state [no sysfs|mapped|connected|active]
+  list-assignments               Per-initiator LUN mappings    (la)
+  list-all                       Runs all list commands in sequence    (ll)
+
+${CYN}Port Management:${NC}
+  port enable  <wwn>|--port N    Write enabled=1 to SCST sysfs, save to config
+  port disable <wwn>|--port N    Write enabled=0, remove from config
+
+${CYN}LUN Mapping:${NC}
+  open  <extent>|--ext N         Map extent to default group (all initiators), LUN auto
+  close <extent>|--ext N         Remove from default group
+  assign   <extent>|--ext N  <wwn>|--init N  [lun]
+                                 Map extent to a specific initiator's group
+  unassign <extent>|--ext N  <wwn>|--init N
+                                 Remove per-initiator mapping
+
+${CYN}LUN Staging:${NC}
+  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
+                                 in config.json; does not touch live sysfs. Multiple lun set
+                                 calls can be staged; validated as a unit at apply time.
+                                 Setting the current live LUN number cancels any pending change.
+  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
+  lun status [<wwn>]            Show pending LUN changes and merged desired state with
+                                 conflict detection. Prints READY or NOT READY.
+
+${CYN}WWN Names:${NC}
+  name list                      All named WWNs with role and port index
+  name set <wwn> <name> [--port N]
+                                 Assign friendly name; port auto-detected for local HBA ports
+  name get <wwn>                 Show name entry for a WWN
+  name del <wwn>                 Remove name entry
 
 ${CYN}Operation:${NC}
   sync [--apply] [--restart] [--boot]
@@ -4383,13 +4411,6 @@ ${CYN}Operation:${NC}
                                  (no flag): scst.conf only - always safe.
   reset <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
-  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
-                                 in config.json; does not touch live sysfs. Multiple lun set
-                                 calls can be staged; validated as a unit at apply time.
-                                 Setting the current live LUN number cancels any pending change.
-  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
-  lun status [<wwn>]            Show pending LUN changes and merged desired state with
-                                 conflict detection. Prints READY or NOT READY.
   module <load|unload|reload|status>
                                  Manual module management for initial setup and
                                  recovery. Under normal operation the boot entry
@@ -4400,84 +4421,6 @@ ${CYN}Operation:${NC}
                                  reload: unload then load (applies param changes).
                                  status: show loaded module, applied vs configured params.
   teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
-
-${CYN}Status:${NC}
-  stats [--watch] [--wide]       Live IO counters; --watch refreshes every 2s    (sw / si)
-  status                         Full state: modules, ports, sessions, gap analysis.  (st)
-                                 Passively captures seen_initiators from active sessions.
-  list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN    (lh)
-  list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
-  list-extents                   SCST extents with size, config state [open|assigned],  (le)
-                                 and live sysfs state [no sysfs|mapped|connected|active]
-  list-initiators                Connected initiators with IO stats; seen history always shown  (li)
-  list-assignments               Per-initiator LUN mappings    (la)
-  list-all                       Runs all five list commands in sequence    (ll)
-
-${CYN}Log Management:${NC}
-  log show [--tail N]            Full log (paged); --tail N shows last N lines
-  log boot                       Current boot session (from last boot marker)
-  log last [N]                   Previous N boot sessions (default 1)
-  log clear                      Truncate log file (confirms before clearing)
-  log trim [N]                   Keep last N boot sessions, discard older (default 10)
-  log grep <pattern>             Filter log by pattern
-  log path                       Print log file path
-  log status                     Size, line count, session count, oldest/newest entry
-
-${CYN}Port Management:${NC}
-  port enable  <wwn>|--port N    Write enabled=1 to SCST sysfs, save to config
-  port disable <wwn>|--port N    Write enabled=0, remove from config
-
-${CYN}LUN Mapping:${NC}
-  open  <extent>|--ext N         Map extent to default group (all initiators), LUN auto
-  close <extent>|--ext N         Remove from default group
-  assign   <extent>|--ext N  <wwn>|--init N  [lun]
-                                 Map extent to a specific initiator's group
-  unassign <extent>|--ext N  <wwn>|--init N
-                                 Remove per-initiator mapping
-
-${CYN}Operation:${NC}
-  sync [--apply] [--restart] [--boot]
-                                 Rebuild scst.conf from config.json.
-                                 --apply  : rebuild scst.conf then apply to live
-                                            SCST via scstadmin. Non-disruptive.
-                                            Use when extents show [no sysfs].
-                                 --restart: rebuilds scst.conf then restarts
-                                            scst.service. All active sessions
-                                            dropped. Use after a BE change.
-                                 --system : write/restore /etc files (modprobe
-                                            conf and SCST ordering drop-in).
-                                            Implied by --preinit.
-                                 --preinit: write /etc files, reload module with
-                                            correct params. Runs before SCST
-                                            starts. Used by PREINIT boot entry.
-                                            Implies --system. Never prompts.
-                                 (no flag): scst.conf only - always safe.
-  reset <seen|ports|mappings|names|all>
-                                 Clear accumulated state from config.json and live sysfs
-  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
-                                 in config.json; does not touch live sysfs. Multiple lun set
-                                 calls can be staged; validated as a unit at apply time.
-                                 Setting the current live LUN number cancels any pending change.
-  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
-  lun status [<wwn>]            Show pending LUN changes and merged desired state with
-                                 conflict detection. Prints READY or NOT READY.
-  module <load|unload|reload|status>
-                                 Manual module management for initial setup and
-                                 recovery. Under normal operation the PREINIT boot
-                                 entry handles the module lifecycle automatically.
-                                 load  : modprobe qla2xxx_scst with configured params.
-                                         Use for initial setup or after unload.
-                                 unload: modprobe -r qla2xxx_scst, revert to qla2xxx.
-                                 reload: unload then load (applies param changes).
-                                 status: show loaded module, applied vs configured params.
-  teardown                       Deactivate targets, unload qla2xxx_scst, revert to initiator
-
-${CYN}WWN Names:${NC}
-  name list                      All named WWNs with role and port index
-  name set <wwn> <name> [--port N]
-                                 Assign friendly name; port auto-detected for local HBA ports
-  name get <wwn>                 Show name entry for a WWN
-  name del <wwn>                 Remove name entry
 
 ${CYN}Configuration:${NC}
   isp-params list                Show all ISP profiles; marks active (*) and detected
@@ -4501,18 +4444,29 @@ ${CYN}Firmware:${NC}
   fw use <version|hba|dist> [--port N]
                                  Set active firmware source in config.json.
                                  hba=HBA flash (default), dist=os-marked version,
-                                 boot or a reboot.
+                                 takes effect on next boot or reboot.
   fw show [--port N]             Per-port detail: running, optrom, stored versions,
                                  selection, ql2xfwloadbin source
   fw status                      One-line summary per port with sync indicator
 
 ${CYN}Deployment:${NC}
   deploy install [--mode M]      Install: register boot entry, write /etc artefacts,
-                                 copy script to QLE_ADM_HOME. Modes: grub, blacklist,
-                                 grub (default). Prompts if --mode not given.
+                                 copy script to QLE_ADM_HOME. Modes: grub (default),
+                                 blacklist, reload. Prompts if --mode not given.
   deploy uninstall               Remove all installed components and kernel cmdline tokens
-  deploy reconfigure [--mode M]  Switch boot mode. Tears down old, installs new.
+  deploy reconfigure [--mode M]  Switch boot mode. Tears down old artefacts, installs new.
+                                 Offers reboot / sync --restart / defer after change.
   deploy status                  Show active mode and artefact state with gap analysis
+
+${CYN}Log Management:${NC}
+  log show [--tail N]            Full log (paged); --tail N shows last N lines
+  log boot                       Current boot session (from last boot marker)
+  log last [N]                   Previous N boot sessions (default 1)
+  log clear                      Truncate log file (confirms before clearing)
+  log trim [N]                   Keep last N boot sessions, discard older (default 10)
+  log grep <pattern>             Filter log by pattern
+  log path                       Print log file path
+  log status                     Size, line count, session count, oldest/newest entry
 
 ${CYN}Subcommands:${NC}
   examples                       Common workflow examples
@@ -4529,88 +4483,64 @@ ${CYN}Index Selection:${NC}
   --port N     FC port by index from list-ports
   --init N     Initiator by index from list-initiators (active or seen)
   --ext N      Extent by index from list-extents
-  Mixing a positional WWN/name with --port/--init/--ext is an error.
-
-${DIM}Config: ${QLE_ADM_HOME}/config.json
-Log:    ${LOG}${NC}
-
 HELP_EOF
 )"
     divider
 }
 
-cmd_examples() {
-    # Section headings use hdr(); per-section dividers are suppressed via
-    # _LIST_ALL_MODE so only a single closing divider appears at the very end.
-    local _LIST_ALL_MODE=1
 
+cmd_examples() {
+    local _LIST_ALL_MODE=1
     hdr "qle_adm.sh v${VERSION} - Examples"
 
-    hdr "Monitoring"
+    hdr "Monitoring and status"
     cat << 'EX'
-
-  # Live IO stats (refreshes every 2s)
-  ./qle_adm.sh stats --watch
-
-  # Wide format (one line per port)
-  ./qle_adm.sh stats --wide
 
   # Full status with gap analysis
-  ./qle_adm.sh status
+  qle_adm.sh status
+
+  # Live IO stats (refreshes every 2s)
+  qle_adm.sh stats --watch
+
+  # See all ports, initiators, extents, and assignments
+  qle_adm.sh list-all
 
 EX
 
-    hdr "Bring up a target port and map a LUN"
+    hdr "Enable a port and map LUNs"
     cat << 'EX'
-
-  # See available ports and extents
-  ./qle_adm.sh list-all
 
   # Enable port 0 as FC target
-  ./qle_adm.sh port enable --port 0
+  qle_adm.sh port enable --port 0
 
   # Expose an extent to all initiators (open access)
-  ./qle_adm.sh open --ext 0
+  qle_adm.sh open --ext 0
 
   # Or assign to a specific initiator only
-  ./qle_adm.sh assign --ext 0 --init 0
+  qle_adm.sh assign --ext 0 --init 0
+
+  # Assign with explicit LUN number
+  qle_adm.sh assign --ext 1 --init 0 2
+
+  # Remove a mapping
+  qle_adm.sh unassign --ext 0 --init 0
 
 EX
 
-    hdr "Sync config.json to scst.conf"
+    hdr "Deferred LUN renumbering"
     cat << 'EX'
 
-  # After a WUI iSCSI save that wiped the FC target block (scst.conf only):
-  ./qle_adm.sh sync
+  # Stage a LUN number change (does not touch live sessions)
+  qle_adm.sh lun set g1ed2-debian 51:40:2e:c0:01:7c:6f:1c 3
 
-  # Apply scst.conf to live SCST non-disruptively (no restart, no session drops):
-  # Use when list-extents shows [no sysfs] or after qla2x00t was not registered
-  # at boot time.
-  ./qle_adm.sh sync --apply
+  # Review pending changes and conflict status
+  qle_adm.sh lun status
 
-  # Rebuild scst.conf and restart SCST so it re-reads the file:
-  ./qle_adm.sh sync --restart
+  # Apply - validated as a unit, SCST restarted (drops sessions)
+  qle_adm.sh sync --restart
 
-  # After a BE change or upgrade: restore /etc files, reload module, restart SCST:
-  ./qle_adm.sh sync --boot && ./qle_adm.sh sync --restart
-
-EX
-
-    hdr "Module management"
-    cat << 'EX'
-
-  # Load qla2xxx_scst with configured params (skips if already correct)
-  ./qle_adm.sh module load
-
-  # Check loaded vs configured params
-  ./qle_adm.sh module status
-
-  # Reload after an isp-params change
-  ./qle_adm.sh isp-params use ISP2532 --profile optrom
-  ./qle_adm.sh module reload
-
-  # Revert to initiator mode
-  ./qle_adm.sh module unload
+  # Cancel all pending changes for an initiator
+  qle_adm.sh lun clear-pending 51:40:2e:c0:01:7c:6f:1c
 
 EX
 
@@ -4618,16 +4548,51 @@ EX
     cat << 'EX'
 
   # Name local target ports (port index auto-detected from PCI function)
-  ./qle_adm.sh name set 51:40:2e:c0:01:7b:cf:a8 nas0
-  ./qle_adm.sh name set 51:40:2e:c0:01:7b:cf:aa nas0
+  qle_adm.sh name set 51:40:2e:c0:01:7b:cf:a8 nas0
+  qle_adm.sh name set 51:40:2e:c0:01:7b:cf:aa nas0
 
-  # Name remote initiator ports (first port defaults to :0, second :1)
-  ./qle_adm.sh name set 51:40:2e:c0:01:7b:cf:60 vostro
-  ./qle_adm.sh name set 51:40:2e:c0:01:7b:cf:62 vostro
+  # Name remote initiator ports
+  qle_adm.sh name set 51:40:2e:c0:01:7b:cf:60 vostro
+  qle_adm.sh name set 51:40:2e:c0:01:7b:cf:62 vostro
 
   # Verify
-  ./qle_adm.sh name list
-  ./qle_adm.sh list-initiators
+  qle_adm.sh name list
+  qle_adm.sh list-initiators
+
+EX
+
+    hdr "Sync config.json to scst.conf"
+    cat << 'EX'
+
+  # After a WUI iSCSI save that wiped the FC target block:
+  qle_adm.sh sync
+
+  # Apply scst.conf to live SCST non-disruptively (no session drops):
+  qle_adm.sh sync --apply
+
+  # Rebuild scst.conf and restart SCST:
+  qle_adm.sh sync --restart
+
+  # After a BE change or upgrade - restore /etc files and restart SCST:
+  qle_adm.sh sync --boot && qle_adm.sh sync --restart
+
+EX
+
+    hdr "Module management"
+    cat << 'EX'
+
+  # Load qla2xxx_scst with configured params
+  qle_adm.sh module load
+
+  # Check loaded vs configured params
+  qle_adm.sh module status
+
+  # Reload after an isp-params change
+  qle_adm.sh isp-params use ISP2532 --profile optrom
+  qle_adm.sh module reload
+
+  # Revert to initiator mode
+  qle_adm.sh module unload
 
 EX
 
@@ -4635,44 +4600,44 @@ EX
     cat << 'EX'
 
   # View current profiles and applied vs configured state
-  ./qle_adm.sh isp-params list
+  qle_adm.sh isp-params list
 
   # Add an optrom-firmware profile
-  ./qle_adm.sh isp-params set ISP2532 --profile optrom \
+  qle_adm.sh isp-params set ISP2532 --profile optrom \
     "qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=1"
 
   # Switch active profile then reload module to apply
-  ./qle_adm.sh isp-params use ISP2532 --profile optrom
-  ./qle_adm.sh module reload
+  qle_adm.sh isp-params use ISP2532 --profile optrom
+  qle_adm.sh module reload
 
 EX
 
     hdr "Firmware management"
     cat << 'EX'
 
-  # Capture OS dist firmware before making any changes (one-time per OS version)
-  ./qle_adm.sh fw save-os
+  # Capture OS dist firmware (one-time per OS version)
+  qle_adm.sh fw save-os
 
   # Save optrom firmware from HBA to versioned store
-  ./qle_adm.sh fw save-hba
+  qle_adm.sh fw save-hba
 
   # See all stored versions and current selection
-  ./qle_adm.sh fw list
+  qle_adm.sh fw list
 
   # Show per-port detail including running version and load source
-  ./qle_adm.sh fw show
+  qle_adm.sh fw show
 
-  # Switch to a stored version (takes effect on next boot or sync --system)
-  ./qle_adm.sh fw use 8.08.207
+  # Switch to a stored version (takes effect on next reboot)
+  qle_adm.sh fw use 8.08.207
 
   # Switch back to HBA flash firmware
-  ./qle_adm.sh fw use hba
+  qle_adm.sh fw use hba
 
   # Import a firmware file manually
-  ./qle_adm.sh fw add ISP2532 ~/ql2500_fw_8.08.207.bin
+  qle_adm.sh fw add ISP2532 ~/ql2500_fw_8.08.207.bin
 
   # Remove a stored version (cannot remove currently selected)
-  ./qle_adm.sh fw remove ISP2532 8.07.00
+  qle_adm.sh fw remove ISP2532 8.07.00
 
 EX
 
@@ -4682,36 +4647,32 @@ EX
   # Install with default mode (grub)
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes deploy install
 
-  # Install with grub mode (params via kernel cmdline, no boot-time reload)
-  QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh deploy install --mode grub
-
-  # Install with blacklist mode (module blacklisted, loaded correctly by boot entry)
+  # Install with explicit mode
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh deploy install --mode blacklist
 
   # Check deployment state and artefacts
-  ./qle_adm.sh deploy status
+  qle_adm.sh deploy status
 
-  # Switch boot mode (interactive: shows diff, offers reboot/restart/defer)
-  ./qle_adm.sh deploy reconfigure --mode grub
+  # Switch boot mode
+  qle_adm.sh deploy reconfigure --mode grub
 
-  # Uninstall (removes artefacts and kernel cmdline tokens for current mode)
-  ./qle_adm.sh deploy uninstall
-
-  # Verify overall state after install
-  ./qle_adm.sh status
+  # Uninstall
+  qle_adm.sh deploy uninstall
 
 EX
 
     hdr "Dry-run any operation"
     cat << 'EX'
 
-  ./qle_adm.sh --dry-run sync
-  ./qle_adm.sh --dry-run fw save
-  ./qle_adm.sh --dry-run assign --ext 0 --init 0
+  qle_adm.sh --dry-run sync
+  qle_adm.sh --dry-run fw save-os
+  qle_adm.sh --dry-run assign --ext 0 --init 0
 
 EX
     _divider_force
 }
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
     local args=()

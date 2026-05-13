@@ -266,25 +266,10 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `status` | `st` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
-| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[assigned]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
+| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-assignments` | `la` | Per-initiator LUN mappings |
 | `list-all` | `ll` | All five list commands in sequence |
-
-### Log management
-
-Boot sessions are delimited in the log by `=== PREINIT sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use the PREINIT marker to identify session boundaries.
-
-| Command | Description |
-|---|---|
-| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
-| `log boot` | Current boot session (from last marker to end of log) |
-| `log last [N]` | Previous N boot sessions for comparison (default 1) |
-| `log clear` | Truncate log file - confirms before clearing |
-| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
-| `log grep <pattern>` | Filter log by pattern |
-| `log path` | Print log file path |
-| `log status` | Size, line count, session count, oldest/newest entry |
 
 ### Port management
 
@@ -311,25 +296,6 @@ Writes to both sysfs (immediate) and config.json (persistent).
 
 All mapping commands write to both sysfs (immediate) and config.json
 (persistent). No separate save step is required.
-
-### Operation
-
-| Command | Description |
-|---|---|
-| `sync [--apply] [--restart] [--boot]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--boot` writes `/etc` artefacts, rebuilds scst.conf, and manages the module per boot_mode; used by the boot entry, never prompts. Without any flag, scst.conf only; always safe. |
-| `reset <target>` | Reset accumulated state (see below) |
-| `lun <set\|clear-pending\|status>` | Stage deferred LUN number changes (see below) |
-| `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
-| `teardown` | Deactivate targets, revert to plain initiator mode |
-
-**reset targets:**
-```
-reset seen       : wipe seen_initiators history
-reset ports      : disable all ports and clear enabled_ports
-reset mappings   : remove all open/assigned LUNs from sysfs and config
-reset names      : wipe all WWN names
-reset all        : all of the above (prompts unless --yes)
-```
 
 ### Deferred LUN number changes
 
@@ -369,6 +335,34 @@ qle_adm.sh lun set g1ed2-debian  51:40:2e:c0:01:7c:6f:1c 1
 qle_adm.sh lun set g1ed2-truenas 51:40:2e:c0:01:7c:6f:1c 0
 qle_adm.sh lun status
 qle_adm.sh sync --restart
+```
+
+### WWN naming
+
+```bash
+./qle_adm.sh name list
+./qle_adm.sh name set <wwn> <name> [--port N]
+./qle_adm.sh name get <wwn>
+./qle_adm.sh name del <wwn>
+```
+
+### Operation
+
+| Command | Description |
+|---|---|
+| `sync [--apply] [--restart] [--boot]` | Rebuild scst.conf from config.json. `--apply` rebuilds scst.conf then applies to live SCST non-disruptively. `--restart` rebuilds scst.conf then restarts scst.service (all sessions dropped). `--boot` writes `/etc` artefacts, rebuilds scst.conf, and manages the module per boot_mode; used by the boot entry, never prompts. Without any flag, scst.conf only; always safe. |
+| `reset <target>` | Reset accumulated state (see below) |
+| `lun <set\|clear-pending\|status>` | Stage deferred LUN number changes (see below) |
+| `module <load\|unload\|reload\|status>` | Manage the qla2xxx_scst kernel module independently of SCST and config files (see below). |
+| `teardown` | Deactivate targets, revert to plain initiator mode |
+
+**reset targets:**
+```
+reset seen       : wipe seen_initiators history
+reset ports      : disable all ports and clear enabled_ports
+reset mappings   : remove all open/assigned LUNs from sysfs and config
+reset names      : wipe all WWN names
+reset all        : all of the above (prompts unless --yes)
 ```
 
 ### Module management
@@ -412,15 +406,6 @@ authoritative source for param drift detection.
 | `save` | Not needed - seen_initiators captured automatically by `status` and `list-initiators` |
 | `repair` | `sync` |
 
-### WWN naming
-
-```bash
-./qle_adm.sh name list
-./qle_adm.sh name set <wwn> <name> [--port N]
-./qle_adm.sh name get <wwn>
-./qle_adm.sh name del <wwn>
-```
-
 ### ISP parameter profiles
 
 ```bash
@@ -452,6 +437,21 @@ authoritative source for param drift detection.
 | `uninstall` | Remove all installed components, preserve config.json |
 
 ---
+
+### Log management
+
+Boot sessions are delimited in the log by `=== Boot sync started ===` marker lines written at the start of each boot run. Session-aware commands (`boot`, `last`, `trim`) use this marker to identify session boundaries.
+
+| Command | Description |
+|---|---|
+| `log show [--tail N]` | Full log, paged. `--tail N` shows last N lines |
+| `log boot` | Current boot session (from last marker to end of log) |
+| `log last [N]` | Previous N boot sessions for comparison (default 1) |
+| `log clear` | Truncate log file - confirms before clearing |
+| `log trim [N]` | Keep last N boot sessions, discard older (default 10) |
+| `log grep <pattern>` | Filter log by pattern |
+| `log path` | Print log file path |
+| `log status` | Size, line count, session count, oldest/newest entry |
 
 ## Initiator Setup
 
