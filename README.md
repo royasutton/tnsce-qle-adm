@@ -38,8 +38,10 @@ changed later with `deploy reconfigure`. The active mode is stored in
 | `blacklist` | Module blacklisted at boot; PREINIT performs the first clean load | No | HBA flash, OS dist, user-stored |
 | `grub` | Params delivered as `qla2xxx_scst.<param>=<val>` kernel cmdline tokens via TrueNAS middleware | No | HBA flash or OS dist only |
 
-**`reload`** is the default and matches the behaviour of all previous releases.
-If you are upgrading from an earlier version, no action is required.
+**`grub`** is the default for new installs. **`reload`** matches the behaviour of all
+previous releases - if you are upgrading from an earlier version, you can keep
+your existing `reload` configuration unchanged or switch to `grub` with
+`deploy reconfigure --mode grub`.
 
 **`blacklist`** and **`grub`** modes manage `kernel_extra_options` in TrueNAS
 via `midclt`. Foreign tokens (unrelated to `qle_adm`) are always preserved
@@ -139,7 +141,7 @@ ready to make this configuration persistent across reboots, see
 
 ```bash
 # 1. Install to a persistent dataset.
-#    Omit --yes to be prompted for boot mode (default: reload).
+#    Omit --yes to be prompted for boot mode (default: grub).
 #    Use --mode to select a specific mode without prompting.
 QLE_ADM_HOME=/mnt/<pool>/admin/qle_adm ./qle_adm.sh --yes deploy install
 

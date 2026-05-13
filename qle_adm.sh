@@ -202,7 +202,7 @@ d = {
     'wwn_names': {},
     'firmware': {},
     'initscript_preinit_id': None,
-    'boot_mode': 'reload',
+    'boot_mode': 'grub',
     'rootwait_was_preexisting': False,
     'pending_luns_version': 1
 }
@@ -1073,7 +1073,7 @@ load_target_module() {
         modprobe -r qla2xxx 2>/dev/null || true
         modprobe -r qla2xxx_scst 2>/dev/null || true
         sleep 1
-        local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'reload')
+        local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'grub')
         if [[ "$boot_mode" == "blacklist" ]]; then
             modprobe -i qla2xxx_scst $params
         else
@@ -1373,7 +1373,7 @@ initscript_remove() {
     [[ -z "$preinit_id" ]] && preinit_id=$(initscript_find_id_preinit)
     if [[ -n "$preinit_id" ]]; then
         if [[ $DRY_RUN -eq 0 ]]; then
-            midclt call initshutdownscript.delete "$preinit_id" 2>/dev/null && \
+            midclt call initshutdownscript.delete "$preinit_id" >/dev/null 2>&1 && \
                 ok "Removed PREINIT entry (id=${preinit_id})" || \
                 warn "Failed to remove PREINIT entry (id=${preinit_id}) - remove manually in WUI"
         else
@@ -1495,14 +1495,15 @@ DROPIN
         echo -e "\n  ${CYN}Select boot mode:${NC}" >/dev/tty
         echo -e "  ${WHT}grub${NC}      - Kernel cmdline params via TrueNAS middleware." >/dev/tty
         echo -e "              No module reload at boot. Firmware: HBA flash or OS dist only." >/dev/tty
+        echo -e "              (default)" >/dev/tty
         echo -e "  ${WHT}blacklist${NC} - Module blacklisted at boot; loaded correctly by boot entry." >/dev/tty
         echo -e "              Firmware: HBA, OS dist, or user-stored versions." >/dev/tty
         echo -e "  ${WHT}reload${NC}    - Module reloaded at every boot to apply correct params." >/dev/tty
         echo -e "              Firmware: HBA, OS dist, or user-stored versions." >/dev/tty
-        echo -e "              (default, same as previous behaviour)\n" >/dev/tty
-        echo -en "${YLW}?${NC}  Choose mode [grub/blacklist/reload] (default: reload): " >/dev/tty
+        echo -e "              (same as previous behaviour)\n" >/dev/tty
+        echo -en "${YLW}?${NC}  Choose mode [grub/blacklist/reload] (default: grub): " >/dev/tty
         local reply; read -r reply </dev/tty || true
-        reply="${reply:-reload}"
+        reply="${reply:-grub}"
         case "$reply" in
             grub|blacklist|reload) echo "$reply" ;;
             *) echo "reload" ;;
@@ -1581,8 +1582,8 @@ DROPIN
             done
             if [[ -z "$new_mode" ]]; then
                 if [[ $YES -eq 1 ]]; then
-                    new_mode="reload"
-                    info "No --mode specified, defaulting to: reload"
+                    new_mode="grub"
+                    info "No --mode specified, defaulting to: grub"
                 else
                     new_mode=$(_deploy_prompt_mode)
                 fi
@@ -1648,7 +1649,7 @@ DROPIN
             [[ $sessions -gt 0 ]] && warn "${sessions} active FC session(s) will be disconnected"
             confirm_or_abort "Proceed with uninstall? All qle_adm configuration will be removed."
 
-            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'reload')
+            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'grub')
             log "deploy uninstall: boot_mode=${cur_mode}"
 
             # Remove kernel cmdline tokens if applicable
@@ -1667,7 +1668,7 @@ DROPIN
 
         reconfigure)
             hdr "Deploy: Reconfigure boot mode"
-            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'reload')
+            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'grub')
             info "Current boot mode: ${cur_mode}"
 
             # Parse --mode argument
@@ -1764,7 +1765,7 @@ DROPIN
         status)
             hdr "Deploy Status"
             cfg_init
-            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'reload')
+            local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'grub')
 
             # Last booted mode from log
             local last_boot_mode=""
@@ -2088,7 +2089,7 @@ cmd_sync() {
     local isp_type; isp_type=$(get_isp_type_dominant)
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
 
-    local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'reload')
+    local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'grub')
 
     if [[ $boot_mode_flag -eq 1 ]]; then
         # Boot context: write /etc files then manage module according to boot_mode.
@@ -2739,97 +2740,103 @@ cmd_status() {
 
     # Boot mode and configuration artefacts
     echo -e "\n${CYN}Boot Mode:${NC}"
-    local cur_boot_mode; cur_boot_mode=$(cfg_get 'boot_mode' 'reload')
-    echo -e "  mode: ${WHT}${cur_boot_mode}${NC}"
+    local cur_boot_mode; cur_boot_mode=$(cfg_get 'boot_mode' 'grub')
+    if [[ ! -f "${CONFIG}" ]]; then
+        echo -e "  ${DIM}Not installed - run 'deploy install'${NC}"
+    else
+        echo -e "  mode: ${WHT}${cur_boot_mode}${NC}"
+    fi
 
     echo -e "\n${CYN}Configuration:${NC}"
-
-    # modprobe conf — expected in reload/blacklist, must be absent in grub
-    if [[ "$cur_boot_mode" == "grub" ]]; then
-        if [[ -f "$MODPROBE_CONF" ]]; then
-            warn "modprobe conf present in grub mode (conflict risk): ${MODPROBE_CONF}"
-            gaps=$((gaps + 1))
-        else
-            ok "modprobe conf absent (correct for grub mode)"
-        fi
-        # Check and display kernel_extra_options owned tokens
-        local cur_opts; cur_opts=$(grub_read_current)
-        local parsed; parsed=$(grub_parse "$cur_opts")
-        local owned; owned=$(echo "$parsed" | grep '^OWNED:' | cut -d: -f2-)
-        echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
-        if [[ -n "${owned// /}" ]]; then
-            ok "kernel_extra_options: qle_adm-owned tokens present"
-        else
-            gap "kernel_extra_options: no qle_adm-owned tokens found - run 'deploy reconfigure'"
-            gaps=$((gaps + 1))
-        fi
-    else
-        if [[ -f "$MODPROBE_CONF" ]]; then
-            ok "modprobe conf present: ${MODPROBE_CONF}"
-        else
-            gap "modprobe conf missing: ${MODPROBE_CONF}"
-            gap "  This is normal after a BE change or upgrade - the boot entry will"
-            gap "  restore it on next reboot. To restore now: sync --boot"
-            gaps=$((gaps + 1))
-        fi
-    fi
-
-    # blacklist mode: check and display kernel_extra_options tokens
-    if [[ "$cur_boot_mode" == "blacklist" ]]; then
-        local cur_opts; cur_opts=$(grub_read_current)
-        echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
-        if echo "$cur_opts" | grep -q "module_blacklist=qla2xxx_scst"; then
-            ok "kernel_extra_options: module_blacklist=qla2xxx_scst present"
-        else
-            gap "kernel_extra_options: module_blacklist=qla2xxx_scst missing - run 'deploy reconfigure'"
-            gaps=$((gaps + 1))
-        fi
-        if echo "$cur_opts" | grep -qw "rootwait"; then
-            ok "kernel_extra_options: rootwait present"
-        else
-            gap "kernel_extra_options: rootwait missing - run 'deploy reconfigure'"
-            gaps=$((gaps + 1))
-        fi
-    fi
-
-    # SCST ordering drop-in — all modes
-    if [[ -f "$SCST_DROPIN" ]]; then
-        ok "SCST ordering drop-in present: ${SCST_DROPIN}"
-    else
-        gap "SCST ordering drop-in missing: ${SCST_DROPIN}"
-        gap "Run 'sync --boot' or 'deploy install' to restore it"
-        gaps=$((gaps + 2))
-    fi
-
-    # Boot entry — all modes
-    if initscript_status; then
-        true
-    else
+    if [[ ! -f "${CONFIG}" ]]; then
+        gap "Not installed - run 'deploy install' to set up boot mode and artefacts"
         gaps=$((gaps + 1))
-    fi
-
-    if grep -q "TARGET_DRIVER qla2x00t" /etc/scst.conf 2>/dev/null; then
-        ok "scst.conf contains TARGET_DRIVER qla2x00t block"
     else
-        gap "scst.conf missing TARGET_DRIVER qla2x00t block - run 'qle_adm.sh sync'"
-        gaps=$((gaps + 1))
-    fi
-
-    # Verify qla2x00t is actually registered with the running SCST instance.
-    # The module registers with SCST at load time - if SCST wasn't running when
-    # the module loaded, registration is lost and qla2x00t will be absent from
-    # sysfs even though scst.conf and the module are both present. This is the
-    # definitive check for a functional FC target stack.
-    if [[ $scst_sysfs -eq 1 ]]; then
-        if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
-            ok "qla2x00t registered with SCST"
+        # modprobe conf — expected in reload/blacklist, must be absent in grub
+        if [[ "$cur_boot_mode" == "grub" ]]; then
+            if [[ -f "$MODPROBE_CONF" ]]; then
+                warn "modprobe conf present in grub mode (conflict risk): ${MODPROBE_CONF}"
+                gaps=$((gaps + 1))
+            else
+                ok "modprobe conf absent (correct for grub mode)"
+            fi
+            # Check and display kernel_extra_options owned tokens
+            local cur_opts; cur_opts=$(grub_read_current)
+            local parsed; parsed=$(grub_parse "$cur_opts")
+            local owned; owned=$(echo "$parsed" | grep '^OWNED:' | cut -d: -f2-)
+            echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
+            if [[ -n "${owned// /}" ]]; then
+                ok "kernel_extra_options: qle_adm-owned tokens present"
+            else
+                gap "kernel_extra_options: no qle_adm-owned tokens found - run 'deploy reconfigure'"
+                gaps=$((gaps + 1))
+            fi
         else
-            gap "qla2x00t not registered with SCST"
-            gap "PREINIT may not have run, or SCST started before PREINIT completed"
-            gap "Run 'sync --restart' to recover, or reinstall to restore boot entries"
-            gaps=$((gaps + 3))
+            if [[ -f "$MODPROBE_CONF" ]]; then
+                ok "modprobe conf present: ${MODPROBE_CONF}"
+                local conf_opts; conf_opts=$(grep '^options' "$MODPROBE_CONF" 2>/dev/null | sed 's/options qla2xxx_scst //' || true)
+                [[ -n "$conf_opts" ]] && echo -e "  ${DIM}options: ${conf_opts}${NC}"
+            else
+                gap "modprobe conf missing: ${MODPROBE_CONF}"
+                gap "  This is normal after a BE change or upgrade - the boot entry will"
+                gap "  restore it on next reboot. To restore now: sync --boot"
+                gaps=$((gaps + 1))
+            fi
         fi
-    fi
+
+        # blacklist mode: check and display kernel_extra_options tokens
+        if [[ "$cur_boot_mode" == "blacklist" ]]; then
+            local cur_opts; cur_opts=$(grub_read_current)
+            echo -e "  kernel_extra_options: ${DIM}${cur_opts:-<empty>}${NC}"
+            if echo "$cur_opts" | grep -q "module_blacklist=qla2xxx_scst"; then
+                ok "kernel_extra_options: module_blacklist=qla2xxx_scst present"
+            else
+                gap "kernel_extra_options: module_blacklist=qla2xxx_scst missing - run 'deploy reconfigure'"
+                gaps=$((gaps + 1))
+            fi
+            if echo "$cur_opts" | grep -qw "rootwait"; then
+                ok "kernel_extra_options: rootwait present"
+            else
+                gap "kernel_extra_options: rootwait missing - run 'deploy reconfigure'"
+                gaps=$((gaps + 1))
+            fi
+        fi
+
+        # SCST ordering drop-in — all modes
+        if [[ -f "$SCST_DROPIN" ]]; then
+            ok "SCST ordering drop-in present: ${SCST_DROPIN}"
+        else
+            gap "SCST ordering drop-in missing: ${SCST_DROPIN}"
+            gap "Run 'sync --boot' or 'deploy install' to restore it"
+            gaps=$((gaps + 2))
+        fi
+
+        # Boot entry — all modes
+        if initscript_status; then
+            true
+        else
+            gaps=$((gaps + 1))
+        fi
+
+        if grep -q "TARGET_DRIVER qla2x00t" /etc/scst.conf 2>/dev/null; then
+            ok "scst.conf contains TARGET_DRIVER qla2x00t block"
+        else
+            gap "scst.conf missing TARGET_DRIVER qla2x00t block - run 'qle_adm.sh sync'"
+            gaps=$((gaps + 1))
+        fi
+
+        # Verify qla2x00t is actually registered with the running SCST instance.
+        if [[ $scst_sysfs -eq 1 ]]; then
+            if [[ -d /sys/kernel/scst_tgt/targets/qla2x00t ]]; then
+                ok "qla2x00t registered with SCST"
+            else
+                gap "qla2x00t not registered with SCST"
+                gap "PREINIT may not have run, or SCST started before PREINIT completed"
+                gap "Run 'sync --restart' to recover, or reinstall to restore boot entries"
+                gaps=$((gaps + 3))
+            fi
+        fi
+    fi # end: installed check
 
     # Param drift check
     local isp_type; isp_type=$(get_isp_type_dominant 2>/dev/null || echo "")
@@ -4334,7 +4341,7 @@ ${WHT}IMPORTANT:${NC} Set QLE_ADM_HOME to a persistent dataset under /mnt before
 ${CYN}Deployment:${NC}
   deploy install [--mode M]      Install: register boot entry, write /etc artefacts,
                                  copy script to QLE_ADM_HOME. Modes: grub, blacklist,
-                                 reload (default). Prompts if --mode not given.
+                                 grub (default). Prompts if --mode not given.
   deploy uninstall               Remove all installed components and kernel cmdline tokens
   deploy reconfigure [--mode M]  Switch boot mode. Tears down old artefacts, installs new.
                                  Offers reboot / sync --restart / defer after change.
@@ -4483,7 +4490,7 @@ ${CYN}Firmware:${NC}
 ${CYN}Deployment:${NC}
   deploy install [--mode M]      Install: register boot entry, write /etc artefacts,
                                  copy script to QLE_ADM_HOME. Modes: grub, blacklist,
-                                 reload (default). Prompts if --mode not given.
+                                 grub (default). Prompts if --mode not given.
   deploy uninstall               Remove all installed components and kernel cmdline tokens
   deploy reconfigure [--mode M]  Switch boot mode. Tears down old, installs new.
   deploy status                  Show active mode and artefact state with gap analysis
@@ -4653,7 +4660,7 @@ EX
     hdr "Deployment"
     cat << 'EX'
 
-  # Install with default mode (reload - same as previous behaviour)
+  # Install with default mode (grub)
   QLE_ADM_HOME=/mnt/tank/admin/qle_adm ./qle_adm.sh --yes deploy install
 
   # Install with grub mode (params via kernel cmdline, no boot-time reload)
