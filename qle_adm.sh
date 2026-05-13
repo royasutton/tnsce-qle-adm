@@ -1765,24 +1765,56 @@ DROPIN
             hdr "Deploy Status"
             cfg_init
             local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'reload')
-            echo -e "\n  ${CYN}Boot mode:${NC} ${WHT}${cur_mode}${NC}"
+
+            # Last booted mode from log
+            local last_boot_mode=""
+            local last_boot_line
+            last_boot_line=$(grep "=== Boot sync started" "${LOG}" 2>/dev/null | tail -1 || true)
+            if [[ -n "$last_boot_line" ]]; then
+                last_boot_mode=$(echo "$last_boot_line" | grep -oP '(?<=boot_mode=)[^\]]+' || true)
+            fi
+
+            echo -e "\n  ${CYN}Boot mode:${NC} ${WHT}${cur_mode}${NC} ${DIM}(configured)${NC}"
+            if [[ -n "$last_boot_mode" ]]; then
+                if [[ "$last_boot_mode" == "$cur_mode" ]]; then
+                    echo -e "  ${CYN}Last boot:${NC}  ${WHT}${last_boot_mode}${NC} ${DIM}(matches configured)${NC}"
+                else
+                    echo -e "  ${CYN}Last boot:${NC}  ${WHT}${last_boot_mode}${NC}"
+                    echo -e "  ${YLW}Pending reboot:${NC} mode change ${last_boot_mode} -> ${cur_mode} not yet active"
+                fi
+            else
+                echo -e "  ${CYN}Last boot:${NC}  ${DIM}no boot sync entry found in log${NC}"
+            fi
             echo ""
 
-            # PREINIT boot entry
+            # PREINIT boot entry - show command
             local preinit_id; preinit_id=$(initscript_find_id_preinit)
             if [[ -n "$preinit_id" ]]; then
-                local enabled
-                enabled=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
+                local entry_json
+                entry_json=$(midclt call initshutdownscript.query 2>/dev/null | python3 -c "
 import json,sys
 for e in json.load(sys.stdin):
     if str(e.get('id','')) == '${preinit_id}':
-        print(e.get('enabled', False))
+        print(json.dumps(e))
         break
-" 2>/dev/null || echo "unknown")
-                if [[ "$enabled" == "True" ]]; then
-                    ok "Boot entry: registered (id=${preinit_id}, enabled)"
+" 2>/dev/null || echo "")
+                if [[ -n "$entry_json" ]]; then
+                    local enabled cmd_str
+                    enabled=$(echo "$entry_json" | python3 -c "import json,sys; e=json.load(sys.stdin); print(e.get('enabled',False))" 2>/dev/null || echo "unknown")
+                    cmd_str=$(echo "$entry_json" | python3 -c "import json,sys; e=json.load(sys.stdin); print(e.get('command',''))" 2>/dev/null || echo "")
+                    if [[ "$enabled" == "True" ]]; then
+                        ok "Boot entry: registered (id=${preinit_id}, enabled)"
+                    else
+                        warn "Boot entry: registered (id=${preinit_id}) but DISABLED"
+                    fi
+                    echo -e "  ${DIM}command: ${cmd_str}${NC}"
+                    # Verify command points to current QLE_ADM_HOME
+                    if [[ -n "$cmd_str" && "$cmd_str" != *"${QLE_ADM_HOME}"* ]]; then
+                        warn "Boot entry command path differs from current QLE_ADM_HOME (${QLE_ADM_HOME})"
+                        warn "Run 'deploy install' to update the boot entry"
+                    fi
                 else
-                    warn "Boot entry: registered (id=${preinit_id}) but DISABLED"
+                    ok "Boot entry: registered (id=${preinit_id})"
                 fi
             else
                 gap "Boot entry: missing - run 'deploy install'"
@@ -1809,10 +1841,12 @@ for e in json.load(sys.stdin):
                     else
                         gap "  No qle_adm-owned tokens found in kernel_extra_options"
                     fi
-                    [[ -n "${foreign// /}" ]] && echo -e "  Foreign tokens: ${foreign}"
+                    [[ -n "${foreign// /}" ]] && echo -e "  ${DIM}Foreign tokens: ${foreign}${NC}"
                     if [[ -f "$MODPROBE_CONF" ]]; then
                         warn "Modprobe conf exists in grub mode (conflict risk): ${MODPROBE_CONF}"
                     fi
+                    local rw_pre; rw_pre=$(cfg_get 'rootwait_was_preexisting' 'false')
+                    echo -e "  ${DIM}rootwait_was_preexisting: ${rw_pre}${NC}"
                     ;;
                 blacklist)
                     local cur_opts; cur_opts=$(grub_read_current)
@@ -1830,8 +1864,12 @@ for e in json.load(sys.stdin):
                     else
                         gap "  rootwait missing from kernel_extra_options"
                     fi
+                    local rw_pre; rw_pre=$(cfg_get 'rootwait_was_preexisting' 'false')
+                    echo -e "  ${DIM}rootwait_was_preexisting: ${rw_pre}${NC}"
                     if [[ -f "$MODPROBE_CONF" ]]; then
                         ok "Modprobe conf: ${MODPROBE_CONF}"
+                        local conf_content; conf_content=$(grep '^options' "$MODPROBE_CONF" 2>/dev/null | sed 's/options qla2xxx_scst //' || true)
+                        [[ -n "$conf_content" ]] && echo -e "  ${DIM}options: ${conf_content}${NC}"
                     else
                         gap "Modprobe conf missing: ${MODPROBE_CONF}"
                     fi
@@ -1839,6 +1877,8 @@ for e in json.load(sys.stdin):
                 reload|*)
                     if [[ -f "$MODPROBE_CONF" ]]; then
                         ok "Modprobe conf: ${MODPROBE_CONF}"
+                        local conf_content; conf_content=$(grep '^options' "$MODPROBE_CONF" 2>/dev/null | sed 's/options qla2xxx_scst //' || true)
+                        [[ -n "$conf_content" ]] && echo -e "  ${DIM}options: ${conf_content}${NC}"
                     else
                         gap "Modprobe conf missing: ${MODPROBE_CONF} - run 'sync --boot'"
                     fi
@@ -2052,7 +2092,7 @@ cmd_sync() {
 
     if [[ $boot_mode_flag -eq 1 ]]; then
         # Boot context: write /etc files then manage module according to boot_mode.
-        log "=== Boot sync started v${VERSION} [boot_mode=${boot_mode}] ==="
+        log "=== Boot sync started [boot_mode=${boot_mode}] ==="
 
         # Always write modprobe conf except in grub mode (where it would conflict
         # with the cmdline params and must not exist).
