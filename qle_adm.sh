@@ -3012,12 +3012,31 @@ cmd_list_extents() {
             echo "$scst_devices" | grep -q "^${ext}$" || stale=1
         fi
 
-        # Config-level status: [open] = in open_extents (world-accessible,
-        # no initiator restriction). [assigned] = per-initiator assignment
-        # (or truly unmapped - see live sysfs status for the distinction).
-        echo "$open_extents" | grep -q "^${ext}$" \
-            && status="${GRN}[open]${NC}" \
-            || status="${DIM}[assigned]${NC}"
+        # Config-level status: [open] = world-accessible, [per-init] = per-initiator
+        # assignment exists in config, [unmapped] = no assignment of any kind.
+        local has_assignment
+        has_assignment=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    # Check open_extents
+    if '${ext}' in d.get('open_extents', []):
+        print('open')
+    else:
+        # Check per-initiator assignments
+        for init, data in d.get('assignments', {}).items():
+            if '${ext}' in data.get('extents', []):
+                print('assigned')
+                exit()
+        print('unmapped')
+except:
+    print('unmapped')
+")
+        case "$has_assignment" in
+            open)     status="${GRN}[open]${NC}" ;;
+            assigned) status="${DIM}[per-init]${NC}" ;;
+            *)        status="${DIM}[unmapped]${NC}" ;;
+        esac
 
         if [[ $stale -eq 1 ]]; then
             live_status="${YLW}[stale - not in scst.conf]${NC}"
