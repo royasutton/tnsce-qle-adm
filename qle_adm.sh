@@ -3071,19 +3071,18 @@ except:
             if [[ $lun_found -eq 0 ]]; then
                 live_status="${YLW}[no sysfs]${NC}"
             else
-                # Session directory name may differ in case from ini_group name.
-                # Use a glob to find the matching session directory.
+                # Session may be on any target port - search all targets
+                # for a session matching the initiator group name.
                 local sess_path=""
-                local tgt_sessions="/sys/kernel/scst_tgt/targets/qla2x00t/${matched_target}/sessions"
-                for _sp in "${tgt_sessions}"/*/; do
-                    [[ -d "$_sp" ]] || continue
-                    local _sp_name; _sp_name=$(basename "${_sp%/}")
+                for _tgt_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
+                    [[ -d "$_tgt_dir" ]] || continue
+                    local _sp_name; _sp_name=$(basename "${_tgt_dir%/}")
                     if [[ "${_sp_name,,}" == "${matched_init_group,,}" ]]; then
-                        sess_path="$_sp"
+                        sess_path="$_tgt_dir"
                         break
                     fi
                 done
-                if [[ -z "$sess_path" || ! -d "$sess_path" ]]; then
+                if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}[mapped]${NC}"
                 else
                     local rc wc rk wk ac
@@ -3672,8 +3671,8 @@ cmd_stats() {
                 wc=$(hex_to_dec "$(sysfs_read "${sess_path}/write_cmd_count")")
                 rk=$(hex_to_dec "$(sysfs_read "${sess_path}/read_io_count_kb")")
                 wk=$(hex_to_dec "$(sysfs_read "${sess_path}/write_io_count_kb")")
-                printf "  ${GRN}[%d]${NC} %-23s ${CYN}(%-10s)${NC} %8s %8s  R:%-10s W:%-10s IO: R:%-8s W:%-8s\n" \
-                    "$i" "$init_wwn" "$_ilbl" "" "act:${ac}" "${rc}cmd" "${wc}cmd" "${rk}KB" "${wk}KB"
+                printf "  ${GRN}[%d]${NC} %-23s ${CYN}(%-10s)${NC}  act:%-4s R:%-10s W:%-10s IO: R:%-8s W:%-8s\n" \
+                    "$i" "$init_wwn" "$_ilbl" "${ac}" "${rc}cmd" "${wc}cmd" "${rk}KB" "${wk}KB"
                 i=$((i + 1))
             done
         done

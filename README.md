@@ -210,29 +210,6 @@ starts and the boot is fully automatic.
 
 ---
 
-## When things break
-
-**Link won't come up:**
-```bash
-qle_adm.sh status
-qle_adm.sh list-hba
-qle_adm.sh isp-params list
-qle_adm.sh deploy status
-```
-
-**Block device not appearing on initiator:**
-```bash
-qle_adm.sh list-assignments
-qle_adm.sh list-initiators
-```
-
-**After upgrade - targets not active:**
-```bash
-qle_adm.sh sync --restart
-```
-
----
-
 ## Further reading
 
 See **[GUIDE.md](GUIDE.md)** for complete documentation including full
