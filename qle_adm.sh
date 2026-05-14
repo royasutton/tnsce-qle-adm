@@ -15,7 +15,7 @@
 # Version: 5.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="5.1"
+VERSION="5.1.1"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -717,10 +717,18 @@ get_module_params() {
     # Returns the expanded param string for the given ISP type and profile.
     # The profile name is always resolved to its param string — the name
     # itself is never returned (fixes Bug 1/2: 'default' leaking as output).
+    # A stored value that contains no '=' is treated as corrupt/unset and
+    # the built-in FALLBACK for the ISP type is returned instead.
     local isp_type="$1" profile_override="${2:-}"
     py_json "
 import json
-FALLBACK = 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'
+BUILTINS = {
+    'ISP2432': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'ISP2532': 'qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'ISP2322': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'DEFAULT': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+}
+FALLBACK = BUILTINS.get('${isp_type}', BUILTINS['DEFAULT'])
 try:
     d = json.load(open('${CONFIG}'))
     isp_map = d.get('isp_params', {})
@@ -728,8 +736,9 @@ try:
     active = d.get('isp_active_profile', {}).get('${isp_type}', 'default')
     profile_name = '${profile_override}' if '${profile_override}' else active
     value = entry.get(profile_name, entry.get('default', FALLBACK))
+    # If stored value is not a param string (no '='), use the built-in for this ISP
     if '=' not in str(value):
-        value = entry.get('default', FALLBACK)
+        value = FALLBACK
     print(value)
 except:
     print(FALLBACK)
@@ -4829,15 +4838,31 @@ for isp, entry in d.get('isp_params', {}).items():
             divider
             ;;
         set)
-            # isp-params set <ISP> [--profile <name>] <params>
+            # isp-params set <ISP> [--profile <name>] <params>|default
             local isp_type="${1:-}"; shift || true
             local profile="default"
             [[ "${1:-}" == "--profile" ]] && { profile="${2:-default}"; shift 2 || true; }
             local params="${*}"
             [[ -z "$isp_type" || -z "$params" ]] && {
                 err "Usage: isp-params set <ISP_TYPE> [--profile <name>] '<params>'"
+                err "       Use 'default' as params to restore the built-in default for that ISP type."
                 return 1
             }
+            # If the user passes the literal word "default" as params, restore the
+            # built-in param string for that ISP type rather than storing the word.
+            if [[ "$params" == "default" ]]; then
+                params=$(py_json "
+import json
+DEFAULTS = {
+    'ISP2432': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'ISP2532': 'qlini_mode=dual ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'ISP2322': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+    'DEFAULT': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0',
+}
+print(DEFAULTS.get('${isp_type}', DEFAULTS['DEFAULT']))
+")
+                info "Restoring built-in default params for ${isp_type}: ${params}"
+            fi
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
