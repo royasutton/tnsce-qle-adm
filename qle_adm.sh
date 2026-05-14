@@ -15,7 +15,7 @@
 # Version: 5.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="5.0"
+VERSION="5.1"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -204,7 +204,9 @@ d = {
     'initscript_preinit_id': None,
     'boot_mode': 'grub',
     'rootwait_was_preexisting': False,
-    'pending_luns_version': 1
+    'pending_luns_version': 1,
+    'hba_identity': {},
+    'hba_swap_event': None
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print('Config initialized.')
@@ -512,7 +514,18 @@ resolve_port() {
     if [[ -n "$idx_arg" ]]; then
         local wwn
         wwn=$(get_port_wwn_by_index "$idx_arg")
-        [[ -z "$wwn" ]] && { err "No port at index ${idx_arg}"; exit 1; }
+        if [[ -z "$wwn" ]]; then
+            err "No port at index ${idx_arg} - is qla2xxx_scst loaded? (check: ls /sys/class/fc_host/)"
+            exit 1
+        fi
+        # Guard: result must look like a WWN (xx:xx:xx:xx:xx:xx:xx:xx).
+        # If fc_host is empty, get_port_wwns_sorted returns nothing and
+        # sed -n Np returns empty — caught above.  This catches any other
+        # case where a non-WWN string slips through.
+        if [[ ! "$wwn" =~ ^([0-9a-fA-F]{2}:){7}[0-9a-fA-F]{2}$ ]]; then
+            err "Resolved value '${wwn}' for port ${idx_arg} is not a valid WWN - module may not be loaded"
+            exit 1
+        fi
         info "Port ${idx_arg} resolved to: ${wwn}"
         echo "$wwn"
     else
@@ -610,46 +623,116 @@ detect_hbas() {
     done
 }
 
+dmesg_isp_type() {
+    # Scan dmesg for ISP type without requiring fc_host entries.
+    # Returns the most-frequent ISP type seen since last boot, or empty string.
+    # Works even after rmmod, as long as the module loaded at least once this boot.
+    dmesg 2>/dev/null \
+        | grep -oP 'Found an ISP\K\d+' \
+        | sort | uniq -c | sort -rn \
+        | awk 'NR==1{print "ISP"$2}'
+}
+
+cached_isp_type() {
+    # Returns hba_identity.isp_type from config.json, or empty string.
+    py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('hba_identity', {}).get('isp_type', ''))
+except: print('')
+"
+}
+
 get_isp_type_dominant() {
-    # Returns the ISP type used by all target-capable ports (qla2xxx_scst).
-    # If multiple distinct ISP types are present among detected HBAs, warns
-    # and returns the most common one so the module param selection still works.
-    # If no ISP type can be determined, returns ISP2532 as a safe default for
-    # target mode and emits a warning.
-    # NOTE: warn() writes to stdout; redirect to stderr here so callers using
-    # $(...) capture only the clean ISP type string, not the warning text.
+    # Returns the ISP type used by all target-capable ports.
+    # Three-tier fallback:
+    #   1. fc_host sysfs (most authoritative; requires module loaded)
+    #   2. dmesg direct scan (works after rmmod; fails only on first-ever boot)
+    #   3. hba_identity cache in config.json (survives across boots)
+    #   4. ISP2532 hard default (last resort)
+    # NOTE: warn() writes to stdout; all warn calls here redirect to stderr
+    # so callers using $(...) capture only the clean ISP type string.
+
+    # Tier 1: fc_host sysfs
     local all_types
     all_types=$(detect_hbas | awk '{print $4}' | grep -v UNKNOWN | sort | uniq -c | sort -rn)
-
-    if [[ -z "$all_types" ]]; then
-        warn "Could not determine ISP type from detected HBAs - defaulting to ISP2532" >&2
-        echo "ISP2532"
+    if [[ -n "$all_types" ]]; then
+        local distinct
+        distinct=$(echo "$all_types" | wc -l | tr -d ' ')
+        if [[ "$distinct" -gt 1 ]]; then
+            warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')" >&2
+            warn "Module params will use the most common type - verify with 'module status'" >&2
+        fi
+        echo "$all_types" | awk '{print $2}' | head -1
         return
     fi
 
-    local distinct
-    distinct=$(echo "$all_types" | wc -l | tr -d ' ')
-    if [[ "$distinct" -gt 1 ]]; then
-        warn "Multiple ISP types detected: $(echo "$all_types" | awk '{print $2}' | tr '\n' ' ')" >&2
-        warn "Module params will use the most common type - verify with 'module status'" >&2
+    # Tier 2: dmesg direct scan
+    local dmesg_type
+    dmesg_type=$(dmesg_isp_type)
+    if [[ -n "$dmesg_type" ]]; then
+        warn "fc_host unavailable - ISP type from dmesg: ${dmesg_type}" >&2
+        echo "$dmesg_type"
+        return
     fi
 
-    echo "$all_types" | awk '{print $2}' | head -1
+    # Tier 3: cached value in config.json hba_identity
+    local cached
+    cached=$(cached_isp_type)
+    if [[ -n "$cached" ]]; then
+        warn "fc_host and dmesg unavailable - ISP type from config cache: ${cached}" >&2
+        echo "$cached"
+        return
+    fi
+
+    # Tier 4: hard default
+    warn "Could not determine ISP type from any source - defaulting to ISP2532" >&2
+    echo "ISP2532"
+}
+
+# _hba_identity_write <isp_type> <port_count> <wwns_json_array>
+# Updates hba_identity in config.json with the currently detected hardware.
+# Called by deploy reconfigure (registration) and preinit/hba swap (migration).
+_hba_identity_write() {
+    local isp_type="$1" port_count="$2" wwns_json="$3"
+    local model now
+    model=$(dmesg 2>/dev/null | grep -oP 'QLogic \K[^\s]+(?= -)' | head -1 || echo "")
+    now=$(date -u +"%Y-%m-%dT%H:%M:%S")
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d['hba_identity'] = {
+    'isp_type':      '${isp_type}',
+    'port_count':    ${port_count},
+    'port_wwns':     ${wwns_json},
+    'model':         '${model}',
+    'registered_at': '${now}'
+}
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
 }
 
 get_module_params() {
+    # Returns the expanded param string for the given ISP type and profile.
+    # The profile name is always resolved to its param string — the name
+    # itself is never returned (fixes Bug 1/2: 'default' leaking as output).
     local isp_type="$1" profile_override="${2:-}"
     py_json "
 import json
+FALLBACK = 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'
 try:
     d = json.load(open('${CONFIG}'))
     isp_map = d.get('isp_params', {})
     entry = isp_map.get('${isp_type}', isp_map.get('DEFAULT', {}))
     active = d.get('isp_active_profile', {}).get('${isp_type}', 'default')
-    profile = '${profile_override}' if '${profile_override}' else active
-    print(entry.get(profile, entry.get('default', 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0')))
+    profile_name = '${profile_override}' if '${profile_override}' else active
+    value = entry.get(profile_name, entry.get('default', FALLBACK))
+    if '=' not in str(value):
+        value = entry.get('default', FALLBACK)
+    print(value)
 except:
-    print('qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0')
+    print(FALLBACK)
 "
 }
 
@@ -1715,6 +1798,26 @@ DROPIN
                     _deploy_install_grub_options "$cur_mode" "$isp_type"
                 fi
                 [[ $DRY_RUN -eq 0 ]] && cfg_set 'boot_mode' "$cur_mode"
+                # Register/update hba_identity so PREINIT can detect card swaps
+                if [[ $DRY_RUN -eq 0 ]]; then
+                    local det_wwns det_count
+                    det_wwns=$(python3 -c "
+import os, json
+hosts = sorted(h for h in os.listdir('/sys/class/fc_host/') if h.startswith('host'))
+wwns = []
+for h in hosts:
+    try:
+        raw = open(f'/sys/class/fc_host/{h}/port_name').read().strip().replace('0x','')
+        wwns.append(':'.join(raw[i:i+2] for i in range(0,16,2)))
+    except: pass
+print(json.dumps(wwns))
+" 2>/dev/null || echo "[]")
+                    det_count=$(echo "$det_wwns" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+                    if [[ "$det_count" -gt 0 ]]; then
+                        _hba_identity_write "$isp_type" "$det_count" "$det_wwns"
+                        ok "HBA identity registered: ${isp_type} ${det_count}-port"
+                    fi
+                fi
                 log "deploy reconfigure: re-applied ${cur_mode} mode"
                 ok "Re-applied ${cur_mode} mode artefacts"
                 divider; return 0
@@ -1752,6 +1855,27 @@ DROPIN
             [[ $DRY_RUN -eq 0 ]] && cfg_set 'boot_mode' "$new_mode"
             log "deploy reconfigure: ${cur_mode} -> ${new_mode}"
             ok "Boot mode changed: ${cur_mode} → ${new_mode}"
+
+            # Register/update hba_identity so PREINIT can detect future card swaps
+            if [[ $DRY_RUN -eq 0 ]]; then
+                local det_wwns det_count
+                det_wwns=$(python3 -c "
+import os, json
+hosts = sorted(h for h in os.listdir('/sys/class/fc_host/') if h.startswith('host'))
+wwns = []
+for h in hosts:
+    try:
+        raw = open(f'/sys/class/fc_host/{h}/port_name').read().strip().replace('0x','')
+        wwns.append(':'.join(raw[i:i+2] for i in range(0,16,2)))
+    except: pass
+print(json.dumps(wwns))
+" 2>/dev/null || echo "[]")
+                det_count=$(echo "$det_wwns" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+                if [[ "$det_count" -gt 0 ]]; then
+                    _hba_identity_write "$isp_type" "$det_count" "$det_wwns"
+                    ok "HBA identity registered: ${isp_type} ${det_count}-port"
+                fi
+            fi
 
             local _reconfigure_used_sync=0
             if [[ $YES -eq 0 && $DRY_RUN -eq 0 ]]; then
@@ -2067,6 +2191,280 @@ scstadmin_apply() {
 }
 
 
+
+
+# ─── PREINIT HBA swap detection ───────────────────────────────────────────────
+#
+# Called at the start of sync --boot.  Compares hba_identity in config.json
+# against the hardware detected via /sys/class/fc_host and dmesg.
+#
+# Decision matrix:
+#   WWNs identical                          → match        (no-op)
+#   No hba_identity registered              → unregistered (register, no migration)
+#   ISP type differs (any port count)       → bare_block   (case b)
+#   Same ISP, new port count < old          → bare_block   (case b)
+#   Same ISP, new port count >= old         → auto_migrate (case a / exact match)
+#
+# Returns one of: match | unregistered | auto_migrate | bare_block
+# Populates SWAP_* globals for use by preinit_swap_execute.
+
+preinit_swap_detect() {
+    local cfg_isp cfg_count cfg_wwns_json det_isp det_count det_wwns_json
+
+    cfg_isp=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('hba_identity', {}).get('isp_type', ''))
+except: print('')
+")
+    [[ -z "$cfg_isp" ]] && { echo "unregistered"; return; }
+
+    cfg_count=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('hba_identity', {}).get('port_count', 0))
+except: print(0)
+")
+    cfg_wwns_json=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    import json as j; print(j.dumps(d.get('hba_identity', {}).get('port_wwns', [])))
+except: print('[]')
+")
+
+    det_isp=$(get_isp_type_dominant 2>/dev/null)
+    [[ -z "$det_isp" || "$det_isp" == "UNKNOWN" ]] && det_isp="ISP2532"
+
+    det_count=$(ls /sys/class/fc_host/ 2>/dev/null | grep -c 'host' || echo 0)
+    det_wwns_json=$(python3 -c "
+import os, json
+try:
+    hosts = sorted(h for h in os.listdir('/sys/class/fc_host/') if h.startswith('host'))
+    wwns = []
+    for h in hosts:
+        raw = open(f'/sys/class/fc_host/{h}/port_name').read().strip().replace('0x','')
+        wwns.append(':'.join(raw[i:i+2] for i in range(0,16,2)))
+    print(json.dumps(wwns))
+except: print('[]')
+" 2>/dev/null || echo "[]")
+
+    SWAP_CFG_ISP="$cfg_isp"
+    SWAP_CFG_COUNT="$cfg_count"
+    SWAP_CFG_WWNS="$cfg_wwns_json"
+    SWAP_DET_ISP="$det_isp"
+    SWAP_DET_COUNT="$det_count"
+    SWAP_DET_WWNS="$det_wwns_json"
+
+    local cfg_flat det_flat
+    cfg_flat=$(python3 -c "import json,sys; print(' '.join(json.loads(sys.stdin.read())))" <<< "$cfg_wwns_json" 2>/dev/null || echo "")
+    det_flat=$(python3 -c "import json,sys; print(' '.join(json.loads(sys.stdin.read())))" <<< "$det_wwns_json" 2>/dev/null || echo "")
+
+    [[ "$det_flat" == "$cfg_flat" ]] && { echo "match"; return; }
+
+    if [[ "$det_isp" != "$cfg_isp" ]]; then
+        echo "bare_block"; return
+    fi
+    if [[ "$det_count" -ge "$cfg_count" ]]; then
+        echo "auto_migrate"; return
+    fi
+    echo "bare_block"
+}
+
+# preinit_swap_execute <action>
+# Executes the migration action determined by preinit_swap_detect.
+# Returns 0 to continue normal boot path (render_scst_conf will run).
+# Returns 1 for bare_block: bare block already written, skip render_scst_conf.
+preinit_swap_execute() {
+    local action="$1"
+    local now; now=$(date -u +"%Y-%m-%dT%H:%M:%S")
+
+    case "$action" in
+
+        match)
+            log "boot: HBA identity match - no swap detected"
+            return 0
+            ;;
+
+        unregistered)
+            # First boot with hba_identity feature. Register current hardware.
+            # Do not touch enabled_ports — let existing sync --boot flow handle it.
+            log "boot: hba_identity absent - registering current hardware (first registration)"
+            if [[ "$SWAP_DET_COUNT" -gt 0 ]]; then
+                _hba_identity_write "$SWAP_DET_ISP" "$SWAP_DET_COUNT" "$SWAP_DET_WWNS"
+                log "boot: registered ${SWAP_DET_ISP} ${SWAP_DET_COUNT}-port as hba_identity"
+            fi
+            return 0
+            ;;
+
+        auto_migrate)
+            log "boot: HBA swap detected (auto_migrate) old=${SWAP_CFG_ISP}/${SWAP_CFG_COUNT}p new=${SWAP_DET_ISP}/${SWAP_DET_COUNT}p"
+            warn "HBA swap detected at boot - auto-migrating port configuration"
+
+            local migration_notes
+            migration_notes=$(python3 << PYEOF
+import json, sys
+
+cfg_path = '${CONFIG}'
+cfg  = json.load(open(cfg_path))
+old_wwns = json.loads("""${SWAP_CFG_WWNS}""")
+new_wwns = json.loads("""${SWAP_DET_WWNS}""")
+
+# Map old port i -> new port i for i in 0..len(old_wwns)-1
+wwn_map = {old: new_wwns[i] for i, old in enumerate(old_wwns) if i < len(new_wwns)}
+
+# Remap enabled_ports
+cfg['enabled_ports'] = [wwn_map.get(w, w) for w in cfg.get('enabled_ports', [])]
+
+# Remap target-side wwn_names; preserve initiator-side entries unchanged
+old_target_set = set(old_wwns)
+new_names = {}
+for wwn, entry in cfg.get('wwn_names', {}).items():
+    if wwn in wwn_map:
+        new_names[wwn_map[wwn]] = entry
+    elif wwn not in old_target_set:
+        new_names[wwn] = entry
+cfg['wwn_names'] = new_names
+
+# Extra new ports not in old config
+extra_ports = new_wwns[len(old_wwns):]
+
+# Update hba_identity
+cfg['hba_identity'] = {
+    'isp_type':      '${SWAP_DET_ISP}',
+    'port_count':    len(new_wwns),
+    'port_wwns':     new_wwns,
+    'model':         cfg.get('hba_identity', {}).get('model', ''),
+    'registered_at': '${now}'
+}
+
+notes = f"Auto-migrated {len(old_wwns)} port(s) to new HBA WWNs."
+if extra_ports:
+    notes += f" {len(extra_ports)} new port(s) available - use 'port enable' to activate."
+
+cfg['hba_swap_event'] = {
+    'detected_at':  '${now}',
+    'old_isp':      '${SWAP_CFG_ISP}',
+    'old_wwns':     old_wwns,
+    'new_isp':      '${SWAP_DET_ISP}',
+    'new_wwns':     new_wwns,
+    'action':       'auto_migrated',
+    'extra_ports':  extra_ports,
+    'notes':        notes
+}
+
+json.dump(cfg, open(cfg_path, 'w'), indent=2)
+print(notes)
+PYEOF
+)
+            ok "boot: ${migration_notes}"
+            log "boot: ${migration_notes}"
+
+            # In grub mode, fix module params if they don't match the detected ISP
+            _preinit_fix_grub_params_if_needed "$SWAP_DET_ISP"
+
+            # Normal render_scst_conf will follow in the boot path
+            return 0
+            ;;
+
+        bare_block)
+            log "boot: HBA swap detected (bare_block) old=${SWAP_CFG_ISP}/${SWAP_CFG_COUNT}p new=${SWAP_DET_ISP}/${SWAP_DET_COUNT}p"
+            warn "HBA swap: ISP type mismatch or port count reduced - writing bare FC block"
+            warn "FC targets will be absent until 'hba swap' is run. iSCSI is unaffected."
+
+            python3 << PYEOF
+import json
+cfg = json.load(open('${CONFIG}'))
+old_wwns = json.loads("""${SWAP_CFG_WWNS}""")
+new_wwns = json.loads("""${SWAP_DET_WWNS}""")
+cfg['hba_swap_event'] = {
+    'detected_at': '${now}',
+    'old_isp':     '${SWAP_CFG_ISP}',
+    'old_wwns':    old_wwns,
+    'new_isp':     '${SWAP_DET_ISP}',
+    'new_wwns':    new_wwns,
+    'action':      'bare_block_written',
+    'extra_ports': [],
+    'notes':       "Manual 'hba swap' required before FC targets can be activated."
+}
+json.dump(cfg, open('${CONFIG}', 'w'), indent=2)
+PYEOF
+            # Write a bare TARGET_DRIVER block directly - skip render_scst_conf
+            _preinit_write_bare_fc_block
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Write a bare TARGET_DRIVER qla2x00t {} block into scst.conf.
+# Used by the bare_block swap path so SCST can start (iSCSI still works)
+# even when FC targets cannot be configured.
+_preinit_write_bare_fc_block() {
+    [[ ! -f "$SCST_CONF" ]] && { warn "boot: ${SCST_CONF} not found - cannot write bare FC block"; return 1; }
+    python3 - "$SCST_CONF" << 'PYEOF'
+import sys, re
+conf_path = sys.argv[1]
+with open(conf_path) as f:
+    content = f.read()
+bare = '\nTARGET_DRIVER qla2x00t {\n}\n'
+pattern = re.compile(r'\n?TARGET_DRIVER\s+qla2x00t\s*\{', re.MULTILINE)
+m = pattern.search(content)
+if m:
+    # Remove existing block (brace counting)
+    depth, i, start = 0, m.start(), m.start()
+    for idx in range(m.start(), len(content)):
+        if content[idx] == '{': depth += 1
+        elif content[idx] == '}':
+            depth -= 1
+            if depth == 0:
+                content = content[:start] + content[idx+1:]
+                break
+content = content.rstrip() + bare
+with open(conf_path, 'w') as f:
+    f.write(content)
+PYEOF
+    ok "boot: bare TARGET_DRIVER qla2x00t block written to ${SCST_CONF}"
+    log "boot: bare FC block written (HBA swap bare_block path)"
+}
+
+# Fix module params in grub mode if applied params don't match configured params
+# for the detected ISP type.  midclt is confirmed available at PREINIT on
+# TrueNAS 25.10 (middlewared starts ~84s before ix-preinit fires).
+_preinit_fix_grub_params_if_needed() {
+    local det_isp="$1"
+    local boot_mode; boot_mode=$(cfg_get 'boot_mode' 'grub')
+    [[ "$boot_mode" != "grub" ]] && return 0
+    module_loaded "qla2xxx_scst" || return 0
+
+    local configured applied
+    configured=$(get_module_params "$det_isp")
+    applied=$(get_applied_params)
+
+    if [[ -n "$applied" && "$applied" != "$configured" ]]; then
+        warn "boot: module params drift detected for ${det_isp} - correcting"
+        log "boot: param drift: applied='${applied}' configured='${configured}'"
+        modprobe -r qla2xxx_scst 2>/dev/null || true
+        sleep 1
+        modprobe qla2xxx_scst $configured
+        log "boot: reloaded qla2xxx_scst with ${configured}"
+        ok "boot: module reloaded with correct params for ${det_isp}"
+        # Update kernel_extra_options for next boot
+        local new_opts="rootwait"
+        for tok in $configured; do
+            new_opts+=" qla2xxx_scst.${tok}"
+        done
+        midclt call system.advanced.update \
+            "{\"kernel_extra_options\":\"${new_opts}\"}" \
+            >/dev/null 2>&1 \
+            && log "boot: kernel_extra_options updated for ${det_isp}" \
+            || warn "boot: could not update kernel_extra_options via middleware - run 'deploy reconfigure' to fix"
+    fi
+    return 0
+}
+
 cmd_sync() {
     local boot_mode_flag=0 restart_mode=0 apply_mode=0
     for arg in "$@"; do
@@ -2095,6 +2493,16 @@ cmd_sync() {
         # Boot context: write /etc files then manage module according to boot_mode.
         log "=== Boot sync started [boot_mode=${boot_mode}] ==="
 
+        # HBA swap detection - must run before render_scst_conf so that
+        # enabled_ports and wwn_names reflect the current card's WWNs.
+        local swap_action
+        swap_action=$(preinit_swap_detect)
+        local swap_skip_render=0
+        preinit_swap_execute "$swap_action" || swap_skip_render=1
+        # Re-read isp_type after possible migration (auto_migrate updates hba_identity)
+        isp_type=$(get_isp_type_dominant 2>/dev/null)
+        [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
+
         # Always write modprobe conf except in grub mode (where it would conflict
         # with the cmdline params and must not exist).
         if [[ "$boot_mode" == "grub" ]]; then
@@ -2122,8 +2530,11 @@ DROPIN
         fi
 
         # Always write scst.conf before SCST starts (all modes)
-        render_scst_conf || return 1
-        auto_name_target_ports
+        # Skipped if bare_block swap path already wrote it directly.
+        if [[ $swap_skip_render -eq 0 ]]; then
+            render_scst_conf || return 1
+            auto_name_target_ports
+        fi
 
         # Module management — mode specific
         case "$boot_mode" in
@@ -2704,7 +3115,41 @@ cmd_status() {
 
     local gaps=0
 
-    # Module status
+    # HBA swap event — display and clear (shows once after a boot-time auto-migration)
+    local swap_event
+    swap_event=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    e = d.get('hba_swap_event')
+    if e:
+        import json as j; print(j.dumps(e))
+except: pass
+" 2>/dev/null || true)
+    if [[ -n "$swap_event" ]]; then
+        local ev_action ev_old_isp ev_new_isp ev_at ev_notes
+        ev_action=$(python3 -c "import json,sys; e=json.loads(sys.stdin.read()); print(e.get('action',''))" <<< "$swap_event" 2>/dev/null || echo "")
+        ev_old_isp=$(python3 -c "import json,sys; e=json.loads(sys.stdin.read()); print(e.get('old_isp',''))" <<< "$swap_event" 2>/dev/null || echo "")
+        ev_new_isp=$(python3 -c "import json,sys; e=json.loads(sys.stdin.read()); print(e.get('new_isp',''))" <<< "$swap_event" 2>/dev/null || echo "")
+        ev_at=$(python3 -c "import json,sys; e=json.loads(sys.stdin.read()); print(e.get('detected_at',''))" <<< "$swap_event" 2>/dev/null || echo "")
+        ev_notes=$(python3 -c "import json,sys; e=json.loads(sys.stdin.read()); print(e.get('notes',''))" <<< "$swap_event" 2>/dev/null || echo "")
+        echo -e "\n${YLW}${SYM_WARN}  HBA swap detected at last boot (${ev_at}):${NC}"
+        echo -e "     Action : ${ev_action}"
+        echo -e "     Old HBA: ${ev_old_isp}"
+        echo -e "     New HBA: ${ev_new_isp}"
+        echo -e "     Notes  : ${ev_notes}"
+        if [[ "$ev_action" == "bare_block_written" ]]; then
+            echo -e "     ${YLW}Run 'hba swap' to migrate configuration to the new card.${NC}"
+            gaps=$((gaps + 1))
+        fi
+        # Clear after display — event is shown only once
+        py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d['hba_swap_event'] = None
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+" 2>/dev/null || true
+    fi
     echo -e "\n${CYN}Modules:${NC}"
     if [[ -d /sys/module/qla2xxx_scst ]]; then
         ok "qla2xxx_scst loaded (target mode)"
@@ -2904,6 +3349,150 @@ cmd_status() {
         warn "${gaps} gap(s) detected - review GAP lines above for remediation"
     fi
     divider
+}
+
+cmd_hba() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        swap)
+            hdr "HBA Swap"
+            cfg_init
+
+            local force=0
+            for arg in "$@"; do [[ "$arg" == "--force" ]] && force=1; done
+
+            # Detect current hardware
+            local det_isp det_count det_wwns_json
+            det_isp=$(get_isp_type_dominant 2>/dev/null)
+            [[ -z "$det_isp" || "$det_isp" == "UNKNOWN" ]] && det_isp="ISP2532"
+            det_count=$(ls /sys/class/fc_host/ 2>/dev/null | grep -c 'host' || echo 0)
+            det_wwns_json=$(python3 -c "
+import os, json
+try:
+    hosts = sorted(h for h in os.listdir('/sys/class/fc_host/') if h.startswith('host'))
+    wwns = []
+    for h in hosts:
+        raw = open(f'/sys/class/fc_host/{h}/port_name').read().strip().replace('0x','')
+        wwns.append(':'.join(raw[i:i+2] for i in range(0,16,2)))
+    print(json.dumps(wwns))
+except: print('[]')
+" 2>/dev/null || echo "[]")
+
+            if [[ "$det_count" -eq 0 ]]; then
+                err "No FC ports detected - is qla2xxx_scst loaded?"
+                return 1
+            fi
+
+            local cfg_isp cfg_count cfg_wwns_json
+            cfg_isp=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('hba_identity', {}).get('isp_type', ''))
+except: print('')
+")
+            cfg_count=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print(d.get('hba_identity', {}).get('port_count', 0))
+except: print(0)
+")
+            cfg_wwns_json=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    import json as j; print(j.dumps(d.get('hba_identity', {}).get('port_wwns', [])))
+except: print('[]')
+")
+
+            info "Configured HBA: ${cfg_isp:-<none>}  ${cfg_count}-port"
+            info "Detected HBA:   ${det_isp}  ${det_count}-port"
+            echo ""
+
+            if [[ $force -eq 1 ]]; then
+                # Force path: clear FC config, register new identity, require manual port enable
+                warn "Force mode: clearing enabled_ports and target WWN names"
+                warn "Assignments, extents, and initiator names are preserved."
+                confirm_or_abort "Clear FC port config and register new HBA identity?"
+                local now; now=$(date -u +"%Y-%m-%dT%H:%M:%S")
+                python3 << PYEOF
+import json
+cfg = json.load(open('${CONFIG}'))
+old_wwns = json.loads("""${cfg_wwns_json}""")
+old_target_set = set(old_wwns)
+# Clear enabled_ports
+cfg['enabled_ports'] = []
+# Remove target-side wwn_names only; preserve initiator entries
+new_names = {w: e for w, e in cfg.get('wwn_names', {}).items() if w not in old_target_set}
+cfg['wwn_names'] = new_names
+cfg['hba_identity'] = {
+    'isp_type':      '${det_isp}',
+    'port_count':    ${det_count},
+    'port_wwns':     json.loads("""${det_wwns_json}"""),
+    'model':         '',
+    'registered_at': '${now}'
+}
+json.dump(cfg, open('${CONFIG}', 'w'), indent=2)
+PYEOF
+                ok "HBA identity updated. Run 'deploy reconfigure' then 'port enable' to activate FC targets."
+                return 0
+            fi
+
+            # Validate auto-migrate conditions
+            if [[ "$det_isp" != "$cfg_isp" ]]; then
+                err "ISP type changed (${cfg_isp} → ${det_isp}) - use 'hba swap --force' for cross-ISP migration"
+                return 1
+            fi
+            if [[ "$det_count" -lt "$cfg_count" ]]; then
+                err "New card has fewer ports (${det_count} < ${cfg_count}) - use 'hba swap --force'"
+                return 1
+            fi
+
+            # Show mapping table
+            python3 << PYEOF
+import json
+old_wwns = json.loads("""${cfg_wwns_json}""")
+new_wwns = json.loads("""${det_wwns_json}""")
+print("  Port mapping:")
+for i, old in enumerate(old_wwns):
+    print(f"    old nas0:{i}  {old}  →  new nas0:{i}  {new_wwns[i]}")
+extra = new_wwns[len(old_wwns):]
+for j, w in enumerate(extra):
+    print(f"    new (unactivated):  nas0:{len(old_wwns)+j}  {w}")
+PYEOF
+            echo ""
+            confirm_or_abort "Apply this port mapping?"
+
+            # Execute migration (same logic as PREINIT auto_migrate)
+            SWAP_CFG_ISP="$cfg_isp"
+            SWAP_CFG_COUNT="$cfg_count"
+            SWAP_CFG_WWNS="$cfg_wwns_json"
+            SWAP_DET_ISP="$det_isp"
+            SWAP_DET_COUNT="$det_count"
+            SWAP_DET_WWNS="$det_wwns_json"
+            preinit_swap_execute "auto_migrate"
+
+            # Apply to live sysfs if SCST is running
+            if systemctl is-active scst &>/dev/null; then
+                info "Applying to live sysfs..."
+                scstadmin_apply 0 && ok "Live sysfs updated" || warn "scstadmin apply failed - restart SCST to apply"
+            else
+                info "SCST not running - changes will take effect at next boot"
+            fi
+
+            ok "HBA swap complete. Run 'status' to verify."
+            ;;
+
+        *)
+            err "Usage: hba swap [--force]"
+            err "  hba swap          - auto-migrate port config to new card (same ISP, same or more ports)"
+            err "  hba swap --force  - clear FC port config for manual reconfiguration (cross-ISP or port reduction)"
+            return 1
+            ;;
+    esac
 }
 
 cmd_list_hba() {
@@ -4748,6 +5337,7 @@ main() {
     case "$cmd" in
         deploy)          cmd_deploy "${rest[@]}" ;;
         sync)            cmd_sync "${rest[@]}" ;;
+        hba)             cmd_hba "${rest[@]}" ;;
         lun)            cmd_lun         "${rest[@]}" ;;
         reset)          cmd_reset       "${rest[@]}" ;;
         module)          cmd_module "${rest[@]}" ;;

@@ -22,6 +22,9 @@ in the WUI. `qle_adm.sh` fills that gap:
 - Maps ZFS volumes (extents) to initiators as FC LUNs via sysfs at runtime
 - Persists all configuration in `config.json` across reboots and TrueNAS
   upgrades
+- **Detects HBA card swaps at boot and auto-migrates configuration** to the
+  new card's WWNs before SCST starts — no manual intervention required for
+  same-ISP same-or-larger port count swaps
 - Provides status, diagnostics, and firmware management
 
 ---
@@ -79,12 +82,43 @@ without touching live sysfs state or active sessions.
 
 ---
 
+## HBA identity and card swap detection
+
+`qle_adm.sh` records the installed HBA's identity (ISP type, port count,
+WWNs) in `config.json` whenever `deploy reconfigure` or `hba swap` is run.
+At every boot, `sync --boot` compares the registered identity against the
+hardware detected in `/sys/class/fc_host` and acts accordingly:
+
+| Situation | Action |
+|---|---|
+| WWNs match | No-op — normal boot |
+| Same ISP, new port count ≥ old | **Auto-migrate**: remap `enabled_ports` and target names to new WWNs, continue boot normally |
+| Same ISP, new port count < old | Write bare FC block, log warning — run `hba swap` |
+| Different ISP type | Write bare FC block, log warning — run `hba swap --force` |
+
+After an auto-migration, `status` displays a one-time swap event summary and
+clears it. iSCSI and all non-FC SCST targets are unaffected in all cases.
+
+### Swapping cards manually
+
+```bash
+# Same ISP type, new card has same or more ports — auto-map by port index:
+qle_adm.sh hba swap
+
+# Cross-ISP swap or port count reduction — clears FC config for manual rebuild:
+qle_adm.sh hba swap --force
+# Then:
+qle_adm.sh deploy reconfigure
+qle_adm.sh port enable --port 0
+```
+
+---
+
 ## What you need
 
 - **TrueNAS SCALE CE** (tested on 25.10.x, kernel 6.12)
-- **QLogic ISP2532 or newer HBA** for confirmed target mode support. ISP2432
-  target mode has not been achieved on kernel 6.12 - root cause unknown.
-  ISP2432 works as an initiator.
+- **QLogic ISP2432 or ISP2532 HBA** — both confirmed working in target mode
+  on kernel 6.12 with `qla2xxx_scst` 10.02.09.400-k
 - **SCST running**: verify with `systemctl is-active scst`
 - **A ZFS zvol** registered as an SCST block device in `/etc/scst.conf`
 - **A dataset under `/mnt`** for persistent storage of the script and config
