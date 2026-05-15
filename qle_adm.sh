@@ -3345,7 +3345,11 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
         configured=$(get_module_params "$isp_type")
         if [[ -n "$applied" && "$applied" != "$configured" ]]; then
             gap "Module params drift - applied differs from configured"
-            gap "Run 'sync --restart' or reboot to resync (likely caused by a BE change)"
+            if [[ "$cur_boot_mode" == "grub" ]]; then
+                gap "grub mode: params are set via kernel cmdline - reboot to resync"
+            else
+                gap "Run 'sync --restart' or reboot to resync (likely caused by a BE change)"
+            fi
             gaps=$((gaps + 2))
         fi
     fi
