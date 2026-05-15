@@ -15,7 +15,7 @@
 # Version: 5.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="5.1.1"
+VERSION="5.1.5"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -24,6 +24,7 @@ SCST_DROPIN_DIR="/etc/systemd/system/scst.service.d"
 SCST_DROPIN="${SCST_DROPIN_DIR}/qle-adm-ordering.conf"
 FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
 LOG="${QLE_ADM_HOME}/qle_adm.log"
+SWAP_ENV_FILE="/tmp/qle_adm_swap_env.$$"
 
 QLE_ADM_USE_COLOR="${QLE_ADM_USE_COLOR:-1}"     # 0 = no ANSI color codes in output
 QLE_ADM_USE_UNICODE="${QLE_ADM_USE_UNICODE:-1}" # 0 = ASCII fallback for symbols (─ ● ✓ ⚠ ✗ →)
@@ -2218,6 +2219,10 @@ scstadmin_apply() {
 # Populates SWAP_* globals for use by preinit_swap_execute.
 
 preinit_swap_detect() {
+    # Detects whether an HBA card swap has occurred since hba_identity was last
+    # registered.  Writes SWAP_* variables to SWAP_ENV_FILE so the caller can
+    # source them (they would be lost if set inside a $(...) subshell).
+    # Echoes one of: match | unregistered | auto_migrate | bare_block
     local cfg_isp cfg_count cfg_wwns_json det_isp det_count det_wwns_json
 
     cfg_isp=$(py_json "
@@ -2227,7 +2232,32 @@ try:
     print(d.get('hba_identity', {}).get('isp_type', ''))
 except: print('')
 ")
-    [[ -z "$cfg_isp" ]] && { echo "unregistered"; return; }
+    if [[ -z "$cfg_isp" ]]; then
+        # Collect detected values so unregistered path can write hba_identity
+        det_isp=$(get_isp_type_dominant 2>/dev/null)
+        [[ -z "$det_isp" || "$det_isp" == "UNKNOWN" ]] && det_isp="ISP2532"
+        det_count=$(ls /sys/class/fc_host/ 2>/dev/null | grep -c 'host' || echo 0)
+        det_wwns_json=$(python3 -c "
+import os, json
+try:
+    hosts = sorted(h for h in os.listdir('/sys/class/fc_host/') if h.startswith('host'))
+    wwns = []
+    for h in hosts:
+        raw = open(f'/sys/class/fc_host/{h}/port_name').read().strip().replace('0x','')
+        wwns.append(':'.join(raw[i:i+2] for i in range(0,16,2)))
+    print(json.dumps(wwns))
+except: print('[]')
+" 2>/dev/null || echo "[]")
+        cat > "$SWAP_ENV_FILE" << ENVEOF
+SWAP_CFG_ISP=""
+SWAP_CFG_COUNT=0
+SWAP_CFG_WWNS="[]"
+SWAP_DET_ISP="${det_isp}"
+SWAP_DET_COUNT=${det_count}
+SWAP_DET_WWNS='${det_wwns_json}'
+ENVEOF
+        echo "unregistered"; return
+    fi
 
     cfg_count=$(py_json "
 import json
@@ -2260,12 +2290,15 @@ try:
 except: print('[]')
 " 2>/dev/null || echo "[]")
 
-    SWAP_CFG_ISP="$cfg_isp"
-    SWAP_CFG_COUNT="$cfg_count"
-    SWAP_CFG_WWNS="$cfg_wwns_json"
-    SWAP_DET_ISP="$det_isp"
-    SWAP_DET_COUNT="$det_count"
-    SWAP_DET_WWNS="$det_wwns_json"
+    # Write SWAP_* to temp file — parent must source this after $(...) capture
+    cat > "$SWAP_ENV_FILE" << ENVEOF
+SWAP_CFG_ISP="${cfg_isp}"
+SWAP_CFG_COUNT=${cfg_count}
+SWAP_CFG_WWNS='${cfg_wwns_json}'
+SWAP_DET_ISP="${det_isp}"
+SWAP_DET_COUNT=${det_count}
+SWAP_DET_WWNS='${det_wwns_json}'
+ENVEOF
 
     local cfg_flat det_flat
     cfg_flat=$(python3 -c "import json,sys; print(' '.join(json.loads(sys.stdin.read())))" <<< "$cfg_wwns_json" 2>/dev/null || echo "")
@@ -2294,6 +2327,7 @@ preinit_swap_execute() {
 
         match)
             log "boot: HBA identity match - no swap detected"
+            info "boot: HBA identity match - no swap detected"
             return 0
             ;;
 
@@ -2304,6 +2338,9 @@ preinit_swap_execute() {
             if [[ "$SWAP_DET_COUNT" -gt 0 ]]; then
                 _hba_identity_write "$SWAP_DET_ISP" "$SWAP_DET_COUNT" "$SWAP_DET_WWNS"
                 log "boot: registered ${SWAP_DET_ISP} ${SWAP_DET_COUNT}-port as hba_identity"
+                ok "boot: HBA identity registered: ${SWAP_DET_ISP} ${SWAP_DET_COUNT}-port"
+            else
+                warn "boot: hba_identity absent but no FC ports detected - registration skipped"
             fi
             return 0
             ;;
@@ -2353,16 +2390,20 @@ notes = f"Auto-migrated {len(old_wwns)} port(s) to new HBA WWNs."
 if extra_ports:
     notes += f" {len(extra_ports)} new port(s) available - use 'port enable' to activate."
 
-cfg['hba_swap_event'] = {
-    'detected_at':  '${now}',
-    'old_isp':      '${SWAP_CFG_ISP}',
-    'old_wwns':     old_wwns,
-    'new_isp':      '${SWAP_DET_ISP}',
-    'new_wwns':     new_wwns,
-    'action':       'auto_migrated',
-    'extra_ports':  extra_ports,
-    'notes':        notes
-}
+# Only write swap event if WWNs actually changed — skip for no-op same-card migrations
+if old_wwns != new_wwns[:len(old_wwns)] or extra_ports:
+    cfg['hba_swap_event'] = {
+        'detected_at':  '${now}',
+        'old_isp':      '${SWAP_CFG_ISP}',
+        'old_wwns':     old_wwns,
+        'new_isp':      '${SWAP_DET_ISP}',
+        'new_wwns':     new_wwns,
+        'action':       'auto_migrated',
+        'extra_ports':  extra_ports,
+        'notes':        notes
+    }
+else:
+    cfg['hba_swap_event'] = None
 
 json.dump(cfg, open(cfg_path, 'w'), indent=2)
 print(notes)
@@ -2504,8 +2545,12 @@ cmd_sync() {
 
         # HBA swap detection - must run before render_scst_conf so that
         # enabled_ports and wwn_names reflect the current card's WWNs.
+        # preinit_swap_detect runs in a subshell ($(...)); it writes SWAP_*
+        # variables to SWAP_ENV_FILE so they survive back into this shell.
         local swap_action
         swap_action=$(preinit_swap_detect)
+        # shellcheck source=/dev/null
+        [[ -f "$SWAP_ENV_FILE" ]] && source "$SWAP_ENV_FILE" && rm -f "$SWAP_ENV_FILE"
         local swap_skip_render=0
         preinit_swap_execute "$swap_action" || swap_skip_render=1
         # Re-read isp_type after possible migration (auto_migrate updates hba_identity)
@@ -3420,6 +3465,14 @@ except: print('[]')
             info "Configured HBA: ${cfg_isp:-<none>}  ${cfg_count}-port"
             info "Detected HBA:   ${det_isp}  ${det_count}-port"
             echo ""
+
+            # Guard: no hba_identity registered yet — cannot migrate or map
+            if [[ -z "$cfg_isp" ]]; then
+                warn "No HBA identity registered in config.json."
+                warn "Run 'deploy reconfigure' to register the current card,"
+                warn "or use 'hba swap --force' to clear and rebuild FC config from scratch."
+                return 1
+            fi
 
             if [[ $force -eq 1 ]]; then
                 # Force path: clear FC config, register new identity, require manual port enable
