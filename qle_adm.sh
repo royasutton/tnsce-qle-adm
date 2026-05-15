@@ -4522,7 +4522,7 @@ cmd_fw() {
             if [[ $DRY_RUN -eq 0 ]]; then
                 fw_set_selected "$isp_type" "$ver"
                 ok "Selected firmware for ${isp_type}: ${ver}"
-                info "Takes effect on next boot or 'sync --system'"
+                info "Takes effect on next boot or 'sync --boot'"
             else
                 info "[DRY-RUN] would set firmware.${isp_type}.selected=${ver} in config.json"
             fi
@@ -5004,6 +5004,7 @@ LUN Staging  : lun  set | clear-pending | status
 WWN Names    : name  list | set | get | del
 
 Operation    : sync [--apply] [--restart] [--boot]
+               hba  swap [--force]
                reset  seen | ports | mappings | names | all
                module  load | unload | reload | status
                teardown
@@ -5087,6 +5088,13 @@ ${CYN}Operation:${NC}
                                             Used by the boot entry.
                                             (--preinit/--system are aliases)
                                  (no flag): scst.conf only - always safe.
+  hba swap                       Auto-migrate port config to new card (same ISP, new
+                                 port count >= old). Remaps enabled_ports and target
+                                 wwn_names to new WWNs by port index; applies live if
+                                 SCST is running. Writes hba_identity on completion.
+  hba swap --force               Cross-ISP or port count reduction: clears enabled_ports,
+                                 preserves assignments/extents/initiator names. Run
+                                 'port enable' to re-activate targets after force-swap.
   reset <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
   module <load|unload|reload|status>

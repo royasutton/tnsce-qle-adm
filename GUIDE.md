@@ -263,8 +263,8 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 
 | Command | Short | Description |
 |---|---|---|
-| `status` | `st` |
-| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `status` | `st` | Full state with module, service, scst.conf, port, session, and gap analysis. Passively captures seen_initiators from active sessions. |
+| `stats [--watch] [--wide]` | `sw` / `si` | IO counters and link error stats. `--watch` refreshes every 2s; `--wide` shows per-initiator detail. |
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
@@ -442,8 +442,8 @@ authoritative source for param drift detection.
 ### HBA swap
 
 ```bash
-hba swap           # auto-migrate port config to new card (same ISP, new count ≥ old)
-hba swap --force   # cross-ISP or port count reduction: clears enabled_ports,
+qle_adm.sh hba swap           # auto-migrate port config to new card (same ISP, new count >= old)
+qle_adm.sh hba swap --force   # cross-ISP or port count reduction: clears enabled_ports,
                    # preserves assignments/extents/initiator names
 ```
 
