@@ -79,20 +79,21 @@ alongside the target stack, which causes the ISP2532 to properly assert the
 port signal and complete P2P negotiation. This is required for direct cable
 (switchless) ISP2532 target operation.
 
-### ISP2432 target mode - current status unknown
+### ISP2432 target mode — confirmed working
 
-ISP2432 (QLE2462, QLE2460) hardware supports FC target mode in principle.
-However target mode initialization has not been successfully achieved on Linux
-kernel 6.12 with `qla2xxx_scst`. The card produces AEN `0x8017 a964`
-continuously and `fw_state` returns all-F values - firmware unresponsive in
-target mode. This has been observed across all firmware versions tested and
-with multiple module parameter combinations. The root cause has not been
-determined - it may be a driver/kernel interaction or a parameter combination
-not yet found. Further debugging may resolve it.
+ISP2432 (QLE2462, QLE2460) target mode is confirmed working on Linux kernel
+6.12 with `qla2xxx_scst` using `qlini_mode=disabled`. The card comes up in
+loop mode initially (`LOOP UP detected`) but completes P2P negotiation
+correctly and presents as `Online P2P` with active sessions.
 
-ISP2432 works correctly as a plain initiator using the `qla2xxx` module. If
-you are investigating ISP2432 target mode, use `isp-params set` and
-`module reload` to try parameter combinations without rebooting.
+The default ISP2432 parameter profile is `qlini_mode=disabled ql2xfc2target=1
+ql2xnvmeenable=0 ql2xfwloadbin=0`. Unlike the ISP2532, the ISP2432 does not
+require `qlini_mode=dual` for direct P2P operation — `disabled` is sufficient.
+
+Earlier investigation produced AEN `0x8017 a964` on kernel 6.12. This was a
+driver removal loop caused by ISP2532 module params being applied to an ISP2432
+card (wrong `qlini_mode=dual`). With correct params the card initializes
+cleanly.
 
 ### Why ql2xfwloadbin=0 (HBA flash)
 
@@ -435,8 +436,28 @@ authoritative source for param drift detection.
 |---|---|
 | `deploy install [--mode M]` | Register boot entry, write /etc artefacts, copy script to QLE_ADM_HOME. Modes: grub (default), blacklist, reload |
 | `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
-| `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new |
+| `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new. Writes `hba_identity` on completion. |
 | `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
+
+### HBA swap
+
+```bash
+hba swap           # auto-migrate port config to new card (same ISP, new count ≥ old)
+hba swap --force   # cross-ISP or port count reduction: clears enabled_ports,
+                   # preserves assignments/extents/initiator names
+```
+
+`hba swap` compares `hba_identity` (registered by `deploy reconfigure`) against
+the currently installed card. For same-ISP swaps where the new card has at least
+as many ports, it remaps `enabled_ports` and target `wwn_names` to the new
+WWNs by port index and applies the change live if SCST is running. Use
+`--force` for cross-ISP or port reduction swaps — this clears the FC port
+config and requires `port enable` to re-activate targets.
+
+The PREINIT boot entry performs the same auto-migration automatically at boot,
+so a system that is rebooted after a card swap will self-heal without manual
+intervention for same-ISP same-or-larger swaps. `status` displays a one-time
+summary of any boot-time migration.
 
 ---
 
@@ -670,7 +691,7 @@ Common causes and fixes:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `port_state: Linkdown` on both sides | Wrong `qlini_mode` | Ensure `qlini_mode=dual` for ISP2532 target |
+| `port_state: Linkdown` on both sides | Wrong `qlini_mode` | ISP2532 target requires `qlini_mode=dual`; ISP2432 target requires `qlini_mode=disabled` |
 | `LOOP UP detected` instead of `Online P2P` | Loop topology negotiated | Both sides must use P2P capable firmware |
 | AEN `8017 d17f` flood | No optical signal | Check SFP seating, cable, correct port |
 | `port_type: Unknown` after enable | SCST not running or `qla2x00tgt` not registered | Check `systemctl status scst`, run `sync --restart` |
@@ -682,7 +703,7 @@ Common causes and fixes:
 |---|---|
 | `8017 d17f` | No optical signal (SFP or cable issue) |
 | `8017 4034` | Loop arbitration timeout (topology mismatch) |
-| `8017 a964` | Target mode firmware init failure (ISP2432 on kernel 6.12 - root cause unknown) |
+| `8017 a964` | Target mode firmware init failure — typically caused by wrong `qlini_mode` for the ISP type (e.g. `qlini_mode=dual` applied to ISP2432) |
 | `8017 a284` | FLOGI timeout (target transmitting, initiator not responding) |
 
 ### scst.conf FC block missing after WUI save
@@ -772,14 +793,14 @@ cat /sys/kernel/scst_tgt/targets/qla2x00t/*/rel_tgt_id 2>/dev/null
 
 **Q: Can I use my ISP2432 (QLE2462/QLE2460) as an FC target?**
 
-The hardware supports target mode in principle, but target mode initialization
-has not been successfully achieved on Linux kernel 6.12 with `qla2xxx_scst`.
-The card produces AEN `0x8017 a964` continuously with all firmware versions
-and parameter combinations tested so far. The root cause is not yet determined
-and further debugging may find a working configuration. ISP2432 works correctly
-as an initiator using the plain `qla2xxx` driver. If you are investigating
-ISP2432 target mode, `isp-params set` and `module reload` allow parameter
-changes without rebooting - watch `dmesg` for AEN codes.
+Yes. ISP2432 target mode is confirmed working on kernel 6.12 with
+`qla2xxx_scst` using `qlini_mode=disabled`. The card initializes in loop mode
+initially but completes P2P negotiation and comes up `Online P2P` with active
+sessions. Use `qlini_mode=disabled` (not `dual` — that is for ISP2532 only).
+
+`qle_adm.sh` sets the correct default params per ISP type automatically.
+Run `qle_adm.sh isp-params list` to confirm ISP2432 is detected and using the
+`qlini_mode=disabled` profile.
 
 ---
 
@@ -985,7 +1006,15 @@ but SCST does not re-read it until the next restart.
   "firmware": {},
   "initscript_preinit_id": 3,
   "boot_mode": "grub",
-  "rootwait_was_preexisting": false
+  "rootwait_was_preexisting": false,
+  "hba_identity": {
+    "isp_type": "ISP2432",
+    "port_count": 2,
+    "port_wwns": ["aa:bb:cc:dd:ee:ff:00:01", "aa:bb:cc:dd:ee:ff:00:02"],
+    "model": "QLE2462",
+    "registered_at": "2026-05-14T23:08:15"
+  },
+  "hba_swap_event": null
 }
 ```
 
@@ -1002,15 +1031,17 @@ but SCST does not re-read it until the next restart.
 | `initscript_preinit_id` | TrueNAS middleware id of the registered boot entry. Used by `deploy uninstall` to remove the entry without a comment search. |
 | `boot_mode` | Active boot mode: `grub` (default), `blacklist`, or `reload` |
 | `rootwait_was_preexisting` | Whether `rootwait` was in `kernel_extra_options` before qle_adm added it. Controls whether `rootwait` is removed on uninstall. |
+| `hba_identity` | Installed HBA fingerprint: ISP type, port count, WWNs in PCI function order, model, and registration timestamp. Written by `deploy reconfigure` and `hba swap`. Used by PREINIT swap detection to identify card changes at boot. |
+| `hba_swap_event` | Written when PREINIT auto-migrates a card swap or writes a bare FC block. Displayed once by `status` then cleared to `null`. `null` when no swap was detected at last boot. |
 
 ---
 
 ## Known Limitations
 
-- **ISP2432 target mode:** not achieved on kernel 6.12 - root cause unknown. Card produces AEN `0x8017 a964` with all firmware and parameter combinations tested. May be resolvable with further debugging. Works correctly as an initiator.
 - **Primary flash version:** not readable via sysfs on this driver build. `fw show` reports it as "not exposed by driver".
 - **Sysfs NVRAM writes:** writes to the `nvram` sysfs file update the driver shadow buffer only. Physical EEPROM is not written.
 - **FC root + deep sleep:** incompatible. Use s2idle or disable suspend.
 - **fw flash:** requires `qlflash` utility which is not included and not available via apt on TrueNAS. Set `FLASH_TOOL=` in the script header if using an alternative tool name.
 - **TrueNAS WUI:** has no FC target management. All FC configuration is via `qle_adm.sh`.
 - **WUI iSCSI saves wipe scst.conf:** run `sync` after any WUI iSCSI save to rebuild the FC target block. No SCST restart is needed.
+- **hba swap cross-ISP or port reduction:** requires `hba swap --force` which clears `enabled_ports`. FC targets must be re-enabled manually with `port enable` after force-swapping.

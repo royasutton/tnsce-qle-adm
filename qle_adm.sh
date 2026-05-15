@@ -15,7 +15,7 @@
 # Version: 5.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="5.1.5"
+VERSION="5.2"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
