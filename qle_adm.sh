@@ -2117,12 +2117,23 @@ PYEOF
         return 0
     fi
 
-    # Strip existing block (brace-counted) then append rebuilt one
-    python3 - "$conf" "$block" << 'PYEOF'
+    # Strip existing block (brace-counted) then append rebuilt one.
+    # The rendered block is written to a temp file rather than passed as
+    # argv[2] to avoid ARG_MAX overflow with large configs (7+ assignments
+    # across 4 ports generates a block that exceeds the kernel argv limit,
+    # causing sudo to abort with "argv[3] mismatch" and killing the write).
+    local tmp_block
+    tmp_block=$(mktemp /tmp/qle_adm_block.XXXXXX)
+    printf '%s\n' "$block" > "$tmp_block"
+
+    python3 - "$conf" "$tmp_block" << 'PYEOF'
 import sys, re
 
-conf_path = sys.argv[1]
-new_block  = sys.argv[2]
+conf_path  = sys.argv[1]
+block_path = sys.argv[2]
+
+with open(block_path) as f:
+    new_block = f.read().rstrip()
 
 with open(conf_path) as f:
     content = f.read()
@@ -2144,6 +2155,13 @@ content = content.rstrip() + '\n\n' + new_block + '\n'
 with open(conf_path, 'w') as f:
     f.write(content)
 PYEOF
+
+    local py_exit=$?
+    rm -f "$tmp_block"
+    if [[ $py_exit -ne 0 ]]; then
+        err "render_scst_conf: failed to write FC target block to ${conf}"
+        return 1
+    fi
 
     ok "FC target block written to ${conf}"
     log "render_scst_conf: rewrote TARGET_DRIVER qla2x00t block in ${conf}"
