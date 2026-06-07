@@ -16,6 +16,19 @@
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 VERSION="6.0"
+CONFIG_SCHEMA=2   # current schema version written by cfg_init
+
+# Migration eligibility table.
+# Key format: "from_schema:to_schema"
+# Value: "eligible" or "ineligible:<reason>"
+# Add a new entry here for every future schema change.
+# For multi-hop migrations (e.g. 1->2->3) entries are chained automatically.
+declare -A MIGRATION_TABLE=(
+    ["1:2"]="eligible"
+    # ["2:3"]="eligible"
+    # ["2:4"]="ineligible:structural change - manual rebuild required"
+)
+
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -255,12 +268,12 @@ CSEOF
         err "Unexpected config state: ${result}"
     fi
     err ""
-    err "Back up your config.json, then re-initialise:"
-    err "  cp ${CONFIG} ${CONFIG}.bak"
-    err "  rm ${CONFIG}"
-    err "  qle_adm.sh deploy install   # re-runs cfg_init"
+    err "To migrate your configuration to the current schema run:"
+    err "  qle_adm.sh deploy migrate           # dry-run preview (default)"
+    err "  qle_adm.sh deploy migrate --apply   # write changes (backs up first)"
     err ""
-    err "Re-add your port, group, and LUN mapping configuration manually."
+    err "If migration is not possible see GUIDE.md section"
+    err "'Config Schema Migration' for manual steps."
     exit 1
 }
 
@@ -1549,6 +1562,104 @@ for e in json.load(sys.stdin):
 
 
 
+# ─── Config schema migration functions ────────────────────────────────────────
+# Each function: migrate_N_to_M <config_path> <dry_run:0|1>
+# Prints a summary of changes. On dry_run=0 backs up config then writes.
+# Backup naming: config.json.bak, config.json.bak.1, config.json.bak.2 ...
+
+_migrate_backup() {
+    local cfg="$1"
+    local bak="${cfg}.bak"
+    if [[ ! -f "$bak" ]]; then
+        cp "$cfg" "$bak"
+        ok "Backup written: ${bak}"
+    else
+        local n=1
+        while [[ -f "${bak}.${n}" ]]; do
+            n=$((n + 1))
+        done
+        cp "$cfg" "${bak}.${n}"
+        ok "Backup written: ${bak}.${n}"
+    fi
+}
+
+migrate_1_to_2() {
+    # Schema 1 → 2: per-initiator WWN-keyed assignments → group-based assignments.
+    # Each old assignment entry (key = WWN) becomes a named group where:
+    #   group name   = the WWN (rename with 'group rename' afterwards)
+    #   initiators   = [wwn]
+    #   extents, luns, pending_luns = preserved unchanged
+    # config_schema set to 2. pending_luns_version removed.
+    local cfg="$1" dry_run="$2"
+    local tmp_script; tmp_script=$(mktemp /tmp/qle_migrate.XXXXXX.py)
+    cat > "$tmp_script" << 'PYEOF'
+import json, re, sys
+
+cfg_path = sys.argv[1]
+WWN_RE = re.compile(r'^([0-9a-f]{2}:){7}[0-9a-f]{2}$')
+
+try:
+    d = json.load(open(cfg_path))
+except Exception as e:
+    print("err:" + str(e)); sys.exit(1)
+
+old_assignments = d.get('assignments', {})
+new_assignments = {}
+changes = []
+
+for key, data in old_assignments.items():
+    if WWN_RE.match(key.lower()):
+        new_entry = {
+            'initiators': [key],
+            'extents': data.get('extents', []),
+            'luns': data.get('luns', {}),
+        }
+        if data.get('pending_luns'):
+            new_entry['pending_luns'] = data['pending_luns']
+        new_assignments[key] = new_entry
+        changes.append("  group '" + key + "': 1 initiator, " + str(len(new_entry['extents'])) + " extent(s)")
+    else:
+        new_assignments[key] = data
+
+d['assignments'] = new_assignments
+d['config_schema'] = 2
+d.setdefault('groups', {})
+d.pop('pending_luns_version', None)
+
+preview = json.dumps(d, indent=2)
+print("ok")
+for c in changes:
+    print(c)
+print("---JSON---")
+print(preview)
+PYEOF
+
+    local result; result=$(python3 "$tmp_script" "$cfg")
+    local rc=$?; rm -f "$tmp_script"
+    [[ $rc -ne 0 || "$result" == err:* ]] && { err "Migration failed: ${result#err:}"; return 1; }
+
+    # Split result: summary lines above ---JSON---, JSON below
+    local summary="" json_out="" in_json=0
+    while IFS= read -r line; do
+        if [[ "$line" == "---JSON---" ]]; then in_json=1; continue; fi
+        if [[ $in_json -eq 1 ]]; then json_out+="${line}"$'\n'
+        elif [[ "$line" != "ok" ]]; then summary+="${line}"$'\n'; fi
+    done <<< "$result"
+
+    echo -e "${CYN}Changes:${NC}"
+    [[ -n "$summary" ]] && echo "$summary" || echo "  (no assignments to migrate)"
+
+    if [[ $dry_run -eq 1 ]]; then
+        echo -e "${CYN}Resulting config.json (preview):${NC}"
+        echo "$json_out"
+        return 0
+    fi
+
+    _migrate_backup "$cfg"
+    printf '%s' "$json_out" > "$cfg"
+    ok "config.json written (schema 2)"
+}
+
 cmd_deploy() {
     local subcmd="${1:-status}"; shift || true
 
@@ -2063,13 +2174,129 @@ for e in json.load(sys.stdin):
             divider
             ;;
 
+        migrate)
+            # ── deploy migrate ─────────────────────────────────────────────
+            # User-initiated, optional migration of config.json to the current
+            # schema. Defaults to --dry-run; requires --apply to write.
+            # Always backs up config before writing.
+            local dry_run_migrate=1
+            for _arg in "$@"; do
+                [[ "$_arg" == "--apply" ]] && dry_run_migrate=0
+            done
+
+            hdr "Deploy: Config Migration"
+
+            local detected_schema
+            detected_schema=$(python3 - "${CONFIG}" << 'CSEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('config_schema', 1))
+except Exception as e:
+    print("err:" + str(e))
+CSEOF
+)
+            if [[ "$detected_schema" == err:* ]]; then
+                err "Cannot read config.json: ${detected_schema#err:}"
+                return 1
+            fi
+
+            if [[ "$detected_schema" == "$CONFIG_SCHEMA" ]]; then
+                ok "config.json is already at schema ${CONFIG_SCHEMA} - no migration needed."
+                divider; return 0
+            fi
+
+            # Build migration path by chaining eligible single-step hops
+            local current="$detected_schema"
+            local migration_path=()
+            while [[ "$current" != "$CONFIG_SCHEMA" ]]; do
+                local next=$((current + 1))
+                local key="${current}:${next}"
+                local eligibility="${MIGRATION_TABLE[$key]:-}"
+                if [[ -z "$eligibility" ]]; then
+                    err "No migration path from schema ${current} to ${CONFIG_SCHEMA}."
+                    err "This configuration cannot be migrated automatically."
+                    err ""
+                    err "Manual steps:"
+                    err "  1. Back up:  cp ${CONFIG} ${CONFIG}.bak"
+                    err "  2. Re-init:  rm ${CONFIG} && qle_adm.sh deploy install"
+                    err "  3. Re-add ports, groups, and LUN mappings manually."
+                    err ""
+                    err "See GUIDE.md section 'Config Schema Migration' for details."
+                    return 1
+                fi
+                if [[ "$eligibility" != "eligible" ]]; then
+                    local reason="${eligibility#ineligible:}"
+                    err "Migration from schema ${current} to ${next} is not supported:"
+                    err "  ${reason}"
+                    err "See GUIDE.md section 'Config Schema Migration' for manual steps."
+                    return 1
+                fi
+                migration_path+=("${current}:${next}")
+                current="$next"
+            done
+
+            echo -e "Detected schema: ${WHT}${detected_schema}${NC}"
+            echo -e "Target schema:   ${WHT}${CONFIG_SCHEMA}${NC}"
+            echo -e "Migration path:  ${WHT}$(IFS=' → '; echo "${migration_path[*]// → / → }")${NC}"
+            echo ""
+
+            if [[ $dry_run_migrate -eq 1 ]]; then
+                info "DRY-RUN mode (default). No files will be written."
+                info "Run with '--apply' to write changes. A backup is created automatically."
+                echo ""
+            fi
+
+            for hop in "${migration_path[@]}"; do
+                local from="${hop%%:*}" to="${hop##*:}"
+                local fn="migrate_${from}_to_${to}"
+                if ! declare -f "$fn" > /dev/null 2>&1; then
+                    err "Internal error: migration function '${fn}' not defined."
+                    return 1
+                fi
+                echo -e "${CYN}Step: schema ${from} → ${to}${NC}"
+                "$fn" "$CONFIG" "$dry_run_migrate" || return 1
+                echo ""
+            done
+
+            if [[ $dry_run_migrate -eq 1 ]]; then
+                info "Dry-run complete. Review the output above, then run:"
+                info "  qle_adm.sh deploy migrate --apply"
+            else
+                ok "Migration to schema ${CONFIG_SCHEMA} complete."
+                echo ""
+                local grp_list
+                grp_list=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    for g in d.get('assignments', {}).keys():
+        print(g)
+except: pass
+")
+                if [[ -n "$grp_list" ]]; then
+                    echo -e "${YLW}Group names were derived from initiator WWNs during migration.${NC}"
+                    echo -e "${YLW}Rename them to meaningful names with:${NC}"
+                    echo ""
+                    while IFS= read -r grp; do
+                        echo -e "  qle_adm.sh group rename ${grp} <new-name>"
+                    done <<< "$grp_list"
+                    echo ""
+                    echo -e "${DIM}Run 'list-groups' to review the current group configuration.${NC}"
+                fi
+                log "deploy migrate: schema ${detected_schema} → ${CONFIG_SCHEMA}"
+            fi
+            divider
+            ;;
+
         *)
             err "Unknown deploy subcommand: ${subcmd}"
-            err "Usage: deploy <install|uninstall|reconfigure|status>"
+            err "Usage: deploy <install|uninstall|reconfigure|status|migrate>"
             err "  deploy install [--mode grub|blacklist|reload]"
             err "  deploy uninstall"
             err "  deploy reconfigure [--mode grub|blacklist|reload]"
             err "  deploy status"
+            err "  deploy migrate [--apply]   (default: dry-run preview)"
             return 1
             ;;
     esac
@@ -5261,7 +5488,7 @@ Config       : isp-params  list | set | use | del
 
 Firmware     : fw  list | save-os | save-hba | add | remove | use | show | status
 
-Deployment   : deploy  install | uninstall | reconfigure | status
+Deployment   : deploy  install | uninstall | reconfigure | status | migrate
 
 Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
                     grep <pattern> | path | status
@@ -5399,6 +5626,10 @@ ${CYN}Deployment:${NC}
   deploy reconfigure [--mode M]  Switch boot mode. Tears down old artefacts, installs new.
                                  Offers reboot / sync --restart / defer after change.
   deploy status                  Show active mode and artefact state with gap analysis
+  deploy migrate [--apply]       Migrate config.json to the current schema.
+                                 Defaults to dry-run preview; use --apply to write.
+                                 Backs up config before writing
+                                 (config.json.bak, .bak.1, .bak.2 ...).
 
 ${CYN}Log Management:${NC}
   log show [--tail N]            Full log (paged); --tail N shows last N lines
@@ -5605,6 +5836,10 @@ EX
 
   # Uninstall
   qle_adm.sh deploy uninstall
+
+  # Migrate config.json from an older schema (dry-run first, then apply)
+  qle_adm.sh deploy migrate
+  qle_adm.sh deploy migrate --apply
 
 EX
 

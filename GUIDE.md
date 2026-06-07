@@ -438,6 +438,103 @@ authoritative source for param drift detection.
 | `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
 | `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new. Writes `hba_identity` on completion. |
 | `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
+| `deploy migrate [--apply]` | Migrate config.json to the current schema. Defaults to dry-run preview; use `--apply` to write. Backs up config before writing (`config.json.bak`, `.bak.1`, `.bak.2` ...). |
+
+### Config Schema Migration
+
+When a new version of `qle_adm.sh` introduces a breaking schema change,
+`config.json` must be migrated before the script will operate. The script
+detects the mismatch at startup and refuses to run, printing instructions.
+
+#### Eligibility
+
+Not all schema versions can be migrated automatically. The script maintains
+an internal `MIGRATION_TABLE` that records which version-to-version paths are
+eligible. If a path is marked ineligible (or absent), the script will tell you
+and provide manual steps instead.
+
+Multi-hop migrations (e.g. schema 1 → 2 → 3) are run as sequential steps,
+each confirmed before the next.
+
+#### Running a migration
+
+Always preview first (dry-run is the default):
+
+```bash
+# Preview what will change - no files are written
+qle_adm.sh deploy migrate
+
+# Apply the migration (backs up config.json first)
+qle_adm.sh deploy migrate --apply
+```
+
+A backup is written automatically before any changes are made. If
+`config.json.bak` already exists, the backup is numbered sequentially
+(`config.json.bak.1`, `.bak.2`, etc.).
+
+#### Schema 1 → 2 (v5.x → v6.0)
+
+This migration converts the old per-initiator assignment scheme to the
+group-based schema introduced in v6.0.
+
+**What changes automatically:**
+
+- Each old assignment entry (keyed by initiator WWN) becomes a named group
+- The WWN becomes the sole member of the group's `initiators` list
+- `extents`, `luns`, and any `pending_luns` are preserved unchanged
+- `config_schema: 2` is added; `pending_luns_version` is removed
+
+**What requires manual follow-up:**
+
+Group names are derived from initiator WWNs during migration
+(e.g. `20:00:00:25:b5:c0:a0:1f`). After migration the script prints a list
+of rename commands. Use them to assign meaningful names:
+
+```bash
+qle_adm.sh group rename 20:00:00:25:b5:c0:a0:1f esxi_side_a
+qle_adm.sh group rename 20:00:00:25:b5:c0:b0:7f esxi_side_b
+```
+
+If you have initiators that share access to the same extents, you can
+consolidate them into a single group after migration:
+
+```bash
+# Create a new named group and add both initiators
+qle_adm.sh group create esxi_side_a
+qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:1f
+qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:7f
+
+# Assign extents to the group
+qle_adm.sh assign <extent> esxi_side_a
+
+# Delete the old single-initiator groups
+qle_adm.sh group delete 20:00:00:25:b5:c0:a0:1f
+qle_adm.sh group delete 20:00:00:25:b5:c0:a0:7f
+
+# Sync to update scst.conf
+qle_adm.sh sync
+```
+
+#### If automatic migration is not possible
+
+If the script reports that migration is ineligible, the configuration must
+be rebuilt manually:
+
+```bash
+# Back up the existing config
+cp "${QLE_ADM_HOME}/config.json" "${QLE_ADM_HOME}/config.json.bak"
+
+# Remove the old config and re-initialise
+rm "${QLE_ADM_HOME}/config.json"
+qle_adm.sh deploy install
+
+# Re-add your configuration
+qle_adm.sh port enable <wwn>
+qle_adm.sh group create <name>
+qle_adm.sh group add <name> <wwn>
+qle_adm.sh assign <extent> <group>
+qle_adm.sh sync
+```
 
 ### HBA swap
 
