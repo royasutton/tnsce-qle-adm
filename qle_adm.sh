@@ -2587,8 +2587,22 @@ scstadmin_apply() {
         rm -f "$tmpout"
         return 0
     else
-        err "scstadmin apply failed:"
-        cat "$tmpout" >&2
+        # Detect the SCST kernel constraint: a group with active initiator
+        # sessions cannot be removed even after its LUNs are cleared.
+        # This occurs when group structure changes (add/remove groups,
+        # change initiator membership) while sessions are active.
+        # sync --apply is only safe for LUN-map changes within stable groups.
+        if grep -q "is not empty" "$tmpout" 2>/dev/null; then
+            err "scstadmin apply failed: SCST refused to remove a group with active sessions."
+            err ""
+            err "sync --apply is for LUN mapping changes within stable groups only."
+            err "Group structural changes (add/remove groups, change initiator"
+            err "membership, port attach/detach) require a full SCST restart:"
+            err "  sync --restart"
+        else
+            err "scstadmin apply failed:"
+            cat "$tmpout" >&2
+        fi
         rm -f "$tmpout"
         return 1
     fi
@@ -5812,8 +5826,13 @@ ${CYN}Operation:${NC}
   sync [--apply] [--restart] [--boot]
                                  Rebuild scst.conf from config.json.
                                  --apply  : rebuild scst.conf then apply to live
-                                            SCST via scstadmin. Non-disruptive.
-                                            Use when extents show [no sysfs].
+                                            SCST via scstadmin. Non-disruptive
+                                            for LUN mapping changes within
+                                            stable groups. Not suitable for
+                                            group structural changes (add/remove
+                                            groups, initiator membership, port
+                                            attach/detach) — use --restart for
+                                            those. Use when extents show [no sysfs].
                                  --restart: rebuilds scst.conf then restarts
                                             scst.service. All active sessions
                                             dropped. Use after a BE change.
