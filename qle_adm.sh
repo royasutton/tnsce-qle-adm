@@ -1589,13 +1589,14 @@ migrate_1_to_2() {
     #   group name   = the WWN (rename with 'group rename' afterwards)
     #   initiators   = [wwn]
     #   extents, luns, pending_luns = preserved unchanged
-    # config_schema set to 2. pending_luns_version removed.
+    # config_schema set to 2, version stamped to ${VERSION}. pending_luns_version removed.
     local cfg="$1" dry_run="$2"
     local tmp_script; tmp_script=$(mktemp /tmp/qle_migrate.XXXXXX.py)
     cat > "$tmp_script" << 'PYEOF'
 import json, re, sys
 
-cfg_path = sys.argv[1]
+cfg_path   = sys.argv[1]
+script_ver = sys.argv[2]   # VERSION from the shell, e.g. "6.0"
 WWN_RE = re.compile(r'^([0-9a-f]{2}:){7}[0-9a-f]{2}$')
 
 try:
@@ -1623,6 +1624,7 @@ for key, data in old_assignments.items():
 
 d['assignments'] = new_assignments
 d['config_schema'] = 2
+d['version'] = script_ver
 d.setdefault('groups', {})
 d.pop('pending_luns_version', None)
 
@@ -1634,7 +1636,7 @@ print("---JSON---")
 print(preview)
 PYEOF
 
-    local result; result=$(python3 "$tmp_script" "$cfg")
+    local result; result=$(python3 "$tmp_script" "$cfg" "${VERSION}")
     local rc=$?; rm -f "$tmp_script"
     [[ $rc -ne 0 || "$result" == err:* ]] && { err "Migration failed: ${result#err:}"; return 1; }
 
@@ -1657,7 +1659,7 @@ PYEOF
 
     _migrate_backup "$cfg"
     printf '%s' "$json_out" > "$cfg"
-    ok "config.json written (schema 2)"
+    ok "config.json written (schema 2, version ${VERSION})"
 }
 
 cmd_deploy() {
