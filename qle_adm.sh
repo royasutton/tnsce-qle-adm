@@ -12,10 +12,10 @@
 #   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
 #
 # Requires: bash, python3 (JSON only)
-# Version: 5.0
+# Version: 6.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="5.2"
+VERSION="6.0"
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
 CONFIG="${QLE_ADM_HOME}/config.json"
 MODPROBE_CONF="/etc/modprobe.d/qla2xxx_scst.conf"
@@ -188,10 +188,12 @@ cfg_init() {
 import json
 d = {
     'version': '${VERSION}',
+    'config_schema': 2,
     'mode': 'open',
     'enabled_ports': [],
     'open_extents': [],
     'assignments': {},
+    'groups': {},
     'seen_initiators': {},
     'isp_params': {
         'ISP2432': {'default': 'qlini_mode=disabled ql2xfc2target=1 ql2xnvmeenable=0 ql2xfwloadbin=0'},
@@ -205,13 +207,61 @@ d = {
     'initscript_preinit_id': None,
     'boot_mode': 'grub',
     'rootwait_was_preexisting': False,
-    'pending_luns_version': 1,
     'hba_identity': {},
     'hba_swap_event': None
 }
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print('Config initialized.')
 "
+}
+
+cfg_check_schema() {
+    # Hard stop if config.json predates the group-based schema (v6.0+).
+    # config_schema must be present and equal to 2.
+    # Absent key is treated as non-compliant (same as old installs).
+    local result
+    result=$(python3 - "${CONFIG}" << 'CSEOF'
+import json, re, sys
+WWN_RE = re.compile(r'^([0-9a-f]{2}:){7}[0-9a-f]{2}$')
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("err:read:" + str(e))
+    sys.exit(0)
+schema = d.get('config_schema', None)
+if schema == 2:
+    print("ok")
+    sys.exit(0)
+assignments = d.get('assignments', {})
+wwn_keys = [k for k in assignments if WWN_RE.match(k.lower())]
+if wwn_keys:
+    print("err:old_wwn_keys")
+else:
+    print("err:schema_" + str(schema))
+CSEOF
+)
+    if [[ "$result" == "ok" ]]; then
+        return 0
+    fi
+    err "config.json is not compatible with qle_adm v${VERSION}."
+    err ""
+    if [[ "$result" == "err:old_wwn_keys" ]]; then
+        err "The assignments section uses per-initiator WWN keys (pre-6.0 schema)."
+        err "This version requires the group-based schema (config_schema: 2)."
+    elif [[ "$result" == "err:schema_None" || "$result" == "err:schema_1" ]]; then
+        err "config_schema key is missing or set to an old value."
+        err "This version requires config_schema: 2 (introduced in v6.0)."
+    else
+        err "Unexpected config state: ${result}"
+    fi
+    err ""
+    err "Back up your config.json, then re-initialise:"
+    err "  cp ${CONFIG} ${CONFIG}.bak"
+    err "  rm ${CONFIG}"
+    err "  qle_adm.sh deploy install   # re-runs cfg_init"
+    err ""
+    err "Re-add your port, group, and LUN mapping configuration manually."
+    exit 1
 }
 
 cfg_get_list() {
@@ -534,38 +584,28 @@ resolve_port() {
     fi
 }
 
-resolve_initiator() {
-    local arg="$1" idx_arg="$2"
-    if [[ -n "$arg" && -n "$idx_arg" ]]; then
-        err "Specify either a WWN or --init N, not both"
+resolve_group() {
+    # Resolves a group name to a config.json assignments key.
+    # Accepts a named group string or a bare WWN (for single-initiator groups).
+    local arg="$1"
+    if [[ -z "$arg" ]]; then
+        err "No group name or WWN specified"
         exit 1
     fi
-    if [[ -n "$idx_arg" ]]; then
-        local wwn
-        # First try active sessions, then fall back to seen_initiators
-        wwn=$(get_initiator_wwn_by_index "$idx_arg")
-        if [[ -z "$wwn" ]]; then
-            wwn=$(py_json "
+    local exists
+    exists=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    seen = sorted(d.get('seen_initiators', {}).keys())
-    if ${idx_arg} < len(seen):
-        print(seen[${idx_arg}])
+    print('yes' if '${arg}' in d.get('assignments', {}) else 'no')
 except: pass
 ")
-        fi
-        [[ -z "$wwn" ]] && { err "No initiator at index ${idx_arg} (active or seen)"; exit 1; }
-        info "Initiator ${idx_arg} resolved to: ${wwn}"
-        echo "$wwn"
-    else
-        # Validate WWN format if provided directly (xx:xx:xx:xx:xx:xx:xx:xx)
-        if [[ -n "$arg" && ! "$arg" =~ ^([0-9a-fA-F]{2}:){7}[0-9a-fA-F]{2}$ ]]; then
-            err "Invalid WWN format: ${arg} (expected xx:xx:xx:xx:xx:xx:xx:xx)"
-            exit 1
-        fi
-        echo "$arg"
+    if [[ "$exists" != "yes" ]]; then
+        err "Group '${arg}' not found in config.json"
+        err "Use 'group create <name>' to define a new group, or 'list-groups' to see existing ones."
+        exit 1
     fi
+    echo "$arg"
 }
 
 resolve_extent() {
@@ -1899,6 +1939,7 @@ print(json.dumps(wwns))
         status)
             hdr "Deploy Status"
             cfg_init
+            cfg_check_schema
             local cur_mode; cur_mode=$(cfg_get 'boot_mode' 'grub')
 
             # Last booted mode from log
@@ -2081,14 +2122,17 @@ for port_idx, wwn in enumerate(enabled_ports):
     if open_extents:
         lines.append('')
 
-    for initiator, data in assignments.items():
-        extents = data.get('extents', [])
-        luns    = data.get('luns', {})
+    for grp_name, data in assignments.items():
+        extents    = data.get('extents', [])
+        luns       = data.get('luns', {})
+        initiators = data.get('initiators', [])
         if not extents:
             continue
-        lines.append(f'        GROUP {initiator} {{')
-        lines.append(f'            INITIATOR {initiator}')
-        lines.append('')
+        lines.append(f'        GROUP {grp_name} {{')
+        for init_wwn in initiators:
+            lines.append(f'            INITIATOR {init_wwn}')
+        if initiators:
+            lines.append('')
         for ext in extents:
             lun_id = luns.get(ext, extents.index(ext))
             lines.append(f'            LUN {lun_id} {ext}')
@@ -2551,6 +2595,7 @@ cmd_sync() {
     [[ $apply_mode     -eq 1 ]] && mode_label+=" (apply)"
     hdr "Sync${mode_label}"
     cfg_init
+    cfg_check_schema
 
     local isp_type; isp_type=$(get_isp_type_dominant)
     [[ -z "$isp_type" || "$isp_type" == "UNKNOWN" ]] && isp_type="ISP2532"
@@ -2770,7 +2815,7 @@ except: pass
             warn "  ${ext}"
         done <<< "$stale_exts"
         warn "The WUI may have removed the underlying device. Run 'unassign <extent> <wwn>' to clean up."
-        warn "Use 'list-extents' or 'list-assignments' to identify stale entries."
+        warn "Use 'list-extents' or 'list-groups' to identify stale entries."
     fi
 
     local port_count; port_count=$(cfg_get_list "enabled_ports" | grep -c . || true)
@@ -3173,6 +3218,7 @@ cmd_log() {
 cmd_status() {
     hdr "qle_adm Status v${VERSION}"
     cfg_init
+    cfg_check_schema
 
     # QLE_ADM_HOME display
     echo -e "\n${CYN}Home:${NC}"
@@ -3435,6 +3481,7 @@ cmd_hba() {
         swap)
             hdr "HBA Swap"
             cfg_init
+            cfg_check_schema
 
             local force=0
             for arg in "$@"; do [[ "$arg" == "--force" ]] && force=1; done
@@ -3646,13 +3693,14 @@ cmd_list_all() {
     cmd_list_ports
     cmd_list_extents
     cmd_list_initiators
-    cmd_list_assignments
+    cmd_list_groups
     _divider_force
 }
 
 cmd_list_ports() {
     hdr "FC Ports"
     cfg_init
+    cfg_check_schema
     local enabled_ports; enabled_ports=$(cfg_get_list "enabled_ports")
     detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
         local managed state_col ptype_short
@@ -3929,7 +3977,7 @@ except: pass
     divider
 }
 
-cmd_list_assignments() {
+cmd_list_groups() {
     hdr "LUN Assignments"
 
     local scst_devices; scst_devices=$(get_scst_conf_devices)
@@ -3951,48 +3999,56 @@ cmd_list_assignments() {
         done <<< "$open_extents"
     fi
 
-    echo -e "\n${CYN}Per-Initiator Assignments:${NC}"
-    local init_list _tmp
-    _tmp=$(mktemp)
-    cat > "$_tmp" << 'PYEOF'
+    echo -e "\n${CYN}Group Assignments:${NC}"
+    local grp_list _tmp2
+    _tmp2=$(mktemp)
+    cat > "$_tmp2" << 'PYEOF'
 import json, sys
 cfg = sys.argv[1]
 try:
     d = json.load(open(cfg))
     assignments = d.get("assignments", {})
-    for init, data in assignments.items():
+    for grp, data in assignments.items():
         luns_map = data.get("luns", {})
         extents = data.get("extents", [])
+        initiators = data.get("initiators", [])
         if not extents:
             continue
         pairs = " ".join(str(luns_map.get(ext, i)) + ":" + ext for i, ext in enumerate(extents))
-        print(init + " " + pairs)
+        inits = ",".join(initiators)
+        print(grp + "|" + inits + "|" + pairs)
 except: pass
 PYEOF
-    init_list=$(python3 "$_tmp" "${CONFIG}" 2>/dev/null)
-    rm -f "$_tmp"
-    if [[ -z "$init_list" ]]; then
+    grp_list=$(python3 "$_tmp2" "${CONFIG}" 2>/dev/null)
+    rm -f "$_tmp2"
+    if [[ -z "$grp_list" ]]; then
         echo -e "  ${DIM}(none)${NC}"
     else
         local stale_warned=0
-        while IFS=' ' read -r init rest; do
-            local lbl; lbl=$(wwn_label "$init" "initiator")
-            echo -e "  ${WHT}${init}${NC} (${CYN}${lbl}${NC})"
-            for pair in $rest; do
+        while IFS='|' read -r grp inits pairs; do
+            echo -e "  ${WHT}${grp}${NC}"
+            if [[ -n "$inits" ]]; then
+                IFS=',' read -ra init_arr <<< "$inits"
+                for init_wwn in "${init_arr[@]}"; do
+                    local ilbl; ilbl=$(wwn_label "$init_wwn" "initiator")
+                    echo -e "    ${DIM}initiator: ${init_wwn} (${ilbl})${NC}"
+                done
+            fi
+            for pair in $pairs; do
                 local lun ext stale_tag=""
                 lun="${pair%%:*}"
                 ext="${pair#*:}"
                 if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
-                    stale_tag=$'\n'"        ${DIM}run: unassign ${ext} ${init}${NC}"
+                    stale_tag=$'\n'"        ${DIM}run: unassign ${ext} ${grp}${NC}"
                     stale_warned=1
                 fi
                 echo -e "    LUN ${lun}: ${ext}${stale_tag}"
             done
-        done <<< "$init_list"
+        done <<< "$grp_list"
         if [[ $stale_warned -eq 1 ]]; then
             echo ""
             echo -e "  ${YLW}Stale assignments exist. The extent was removed from the WUI without${NC}"
-            echo -e "  ${YLW}going through qle_adm. Run 'unassign <extent> <wwn>' to clean up.${NC}"
+            echo -e "  ${YLW}going through qle_adm. Run 'unassign <extent> <group>' to clean up.${NC}"
         fi
     fi
     divider
@@ -4085,70 +4141,72 @@ cmd_close() {
 }
 
 cmd_assign() {
-    local ext_arg="${1:-}" ext_idx="${2:-}" init_arg="${3:-}" init_idx="${4:-}" lun="${5:-auto}"
+    local ext_arg="${1:-}" ext_idx="${2:-}" grp_arg="${3:-}" grp_name="${4:-}" lun="${5:-auto}"
     local extent; extent=$(resolve_extent "$ext_arg" "$ext_idx")
-    local initiator; initiator=$(resolve_initiator "$init_arg" "$init_idx")
-    [[ -z "$extent" || -z "$initiator" ]] && { err "Usage: assign <extent>|--ext N <wwn>|--init N [lun]"; return 1; }
-    initiator=$(echo "$initiator" | tr '[:upper:]' '[:lower:]')
-    get_extents_sorted | grep -q "^${extent}$" || { err "Extent '${extent}' not found"; return 1; }
+    local group; group="${grp_name:-$(resolve_group "$grp_arg")}"
+    [[ -z "$extent" || -z "$group" ]] && { err "Usage: assign <extent>|--ext N <group>|--group <name> [lun]"; return 1; }
+    group=$(echo "$group" | tr '[:upper:]' '[:lower:]')
 
-    # Warn if extent already assigned to another initiator
-    local existing_wwns
-    existing_wwns=$(py_json "
+    # Warn if extent already assigned to another group
+    local existing_grps
+    existing_grps=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    others = [i for i,data in d.get('assignments',{}).items()
-              if '${extent}' in data.get('extents',[]) and i != '${initiator}']
+    others = [g for g,data in d.get('assignments',{}).items()
+              if '${extent}' in data.get('extents',[]) and g != '${group}']
     if others: print(' '.join(others))
 except: pass
 ")
-    if [[ -n "$existing_wwns" ]]; then
-        local _ep=() _ew
-        for _ew in $existing_wwns; do
-            local _el; _el=$(wwn_label "$_ew" "initiator")
-            _ep+=("${_ew} (${_el})")
-        done
-        local _existing_lbl; _existing_lbl=$(IFS=', '; echo "${_ep[*]}")
-        warn "Extent '${extent}' is already assigned to: ${_existing_lbl}"
-        confirm_or_abort "Assign to ${initiator} as well?"
+    if [[ -n "$existing_grps" ]]; then
+        warn "Extent '${extent}' is already assigned to: ${existing_grps}"
+        confirm_or_abort "Assign to '${group}' as well?"
     fi
 
-    local _albl; _albl=$(wwn_label "$initiator" "initiator")
-    info "Assigning ${extent} to ${initiator} (${_albl})"
+    info "Assigning ${extent} to group '${group}'"
     py_json "
 import json
 d = json.load(open('${CONFIG}'))
 assignments = d.setdefault('assignments', {})
-init_data = assignments.setdefault('${initiator}', {'extents': [], 'luns': {}})
-if '${extent}' not in init_data['extents']:
-    init_data['extents'].append('${extent}')
-    next_lun = len(init_data['extents']) - 1
+grp_data = assignments.setdefault('${group}', {'initiators': [], 'extents': [], 'luns': {}})
+if '${extent}' not in grp_data['extents']:
+    grp_data['extents'].append('${extent}')
+    next_lun = len(grp_data['extents']) - 1
     if '${lun}' != 'auto':
         next_lun = int('${lun}')
-    init_data['luns']['${extent}'] = next_lun
+    grp_data['luns']['${extent}'] = next_lun
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
-    # Apply live to sysfs
+    # Apply live to sysfs for all enabled ports
     while IFS= read -r wwn; do
         [[ -z "$wwn" ]] && continue
         local tgt_path; tgt_path=$(scst_target_path "$wwn")
         [[ -d "$tgt_path" ]] || continue
-        local grp_path="${tgt_path}/ini_groups/${initiator}"
-        # Only apply sysfs on ports where the initiator has an active session.
-        # Ports without a session (e.g. LPort with no connected initiator) will
-        # reject ini_groups/mgmt writes with EINVAL. Skip them silently.
-        if [[ ! -d "${tgt_path}/sessions/${initiator}" && ! -d "$grp_path" ]]; then
-            continue
-        fi
+        local grp_path="${tgt_path}/ini_groups/${group}"
+        local has_session=0
+        local initiators_in_group
+        initiators_in_group=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for i in d.get('assignments',{}).get('${group}',{}).get('initiators',[]):
+    print(i)
+")
+        while IFS= read -r init_wwn; do
+            [[ -z "$init_wwn" ]] && continue
+            [[ -d "${tgt_path}/sessions/${init_wwn}" ]] && has_session=1 && break
+        done <<< "$initiators_in_group"
+        [[ $has_session -eq 0 && ! -d "$grp_path" ]] && continue
         if [[ ! -d "$grp_path" ]]; then
-            sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${initiator}" || true
-            sysfs_write "${grp_path}/initiators/mgmt" "add ${initiator}" || true
+            sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${group}" || true
+            while IFS= read -r init_wwn; do
+                [[ -n "$init_wwn" ]] && \
+                    sysfs_write "${grp_path}/initiators/mgmt" "add ${init_wwn}" || true
+            done <<< "$initiators_in_group"
         fi
         py_json "
 import json
 d = json.load(open('${CONFIG}'))
-data = d.get('assignments', {}).get('${initiator}', {})
+data = d.get('assignments', {}).get('${group}', {})
 for i, ext in enumerate(data.get('extents', [])):
     lun = data.get('luns', {}).get(ext, i)
     print(f'{lun} {ext}')
@@ -4157,31 +4215,29 @@ for i, ext in enumerate(data.get('extents', [])):
                 sysfs_write "${grp_path}/luns/mgmt" "add ${ext_name} ${lun_id}" || true
         done
     done < <(cfg_get_list "enabled_ports")
-    ok "Assigned ${extent} to ${initiator} (${_albl})"
+    ok "Assigned ${extent} to group '${group}'"
 }
 
 cmd_unassign() {
-    local ext_arg="${1:-}" ext_idx="${2:-}" init_arg="${3:-}" init_idx="${4:-}"
+    local ext_arg="${1:-}" ext_idx="${2:-}" grp_arg="${3:-}" grp_name_arg="${4:-}"
     local extent; extent=$(resolve_extent "$ext_arg" "$ext_idx")
-    local initiator; initiator=$(resolve_initiator "$init_arg" "$init_idx")
-    [[ -z "$extent" || -z "$initiator" ]] && { err "Usage: unassign <extent>|--ext N <wwn>|--init N"; return 1; }
-    initiator=$(echo "$initiator" | tr '[:upper:]' '[:lower:]')
-    local _ulbl; _ulbl=$(wwn_label "$initiator" "initiator")
-    warn "Removing ${extent} from ${initiator} (${_ulbl})"
+    local group; group="${grp_name_arg:-$(resolve_group "$grp_arg")}"
+    [[ -z "$extent" || -z "$group" ]] && { err "Usage: unassign <extent>|--ext N <group>|--group <name>"; return 1; }
+    group=$(echo "$group" | tr '[:upper:]' '[:lower:]')
+    warn "Removing ${extent} from group '${group}'"
     py_json "
 import json
 d = json.load(open('${CONFIG}'))
-init_data = d.get('assignments', {}).get('${initiator}', {})
-extents = init_data.get('extents', [])
+grp_data = d.get('assignments', {}).get('${group}', {})
+extents = grp_data.get('extents', [])
 if '${extent}' in extents:
     extents.remove('${extent}')
-    init_data.get('luns', {}).pop('${extent}', None)
+    grp_data.get('luns', {}).pop('${extent}', None)
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
     while IFS= read -r wwn; do
         [[ -z "$wwn" ]] && continue
-        local grp_name="grp_${initiator//:/_}"
-        local grp_path; grp_path="$(scst_target_path "$wwn")/ini_groups/${grp_name}"
+        local grp_path; grp_path="$(scst_target_path "$wwn")/ini_groups/${group}"
         [[ -d "$grp_path" ]] || continue
         for lun_path in "${grp_path}/luns"/*/; do
             [[ -d "$lun_path" ]] || continue
@@ -4192,7 +4248,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
             fi
         done
     done < <(cfg_get_list "enabled_ports")
-    ok "Unassigned ${extent} from ${initiator} (${_ulbl})"
+    ok "Unassigned ${extent} from group '${group}'"
 }
 
 cmd_reset() {
@@ -4725,10 +4781,10 @@ print(d.get('assignments',{}).get('${wwn}',{}).get('luns',{}).get('${ext}','?'))
     case "$subcmd" in
 
         set)
-            # lun set <extent> <wwn> <new-lun>
+            # lun set <extent> <group> <new-lun>
             local ext="${1:-}" wwn="${2:-}" new_lun="${3:-}"
             [[ -z "$ext" || -z "$wwn" || -z "$new_lun" ]] && {
-                err "Usage: lun set <extent> <wwn> <new-lun>"
+                err "Usage: lun set <extent> <group> <new-lun>"
                 return 1
             }
             [[ "$new_lun" =~ ^[0-9]+$ ]] || { err "LUN must be a non-negative integer"; return 1; }
@@ -4743,7 +4799,7 @@ print('yes' if '${ext}' in exts else 'no')
 ")
             [[ "$assigned" == "yes" ]] || {
                 err "Extent '${ext}' is not assigned to ${wwn}"
-                err "Use 'list-assignments' to see current assignments"
+                err "Use 'list-groups' to see current group assignments"
                 return 1
             }
 
@@ -4789,7 +4845,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
             ;;
 
         clear-pending)
-            # lun clear-pending <wwn> | --all
+            # lun clear-pending <group> | --all
             local target="${1:-}"
             [[ -z "$target" ]] && { err "Usage: lun clear-pending <wwn>|--all"; return 1; }
             if [[ "$target" == "--all" ]]; then
@@ -4824,7 +4880,7 @@ print(count)
             ;;
 
         status)
-            # lun status [<wwn>]
+            # lun status [<group>]
             local target="${1:-}"
             hdr "LUN Pending Changes"
             if [[ -n "$target" ]]; then
@@ -4854,9 +4910,9 @@ for wwn, data in d.get('assignments', {}).items():
         *)
             err "Unknown lun subcommand: ${subcmd}"
             err "Usage: lun <set|clear-pending|status>"
-            err "  lun set <extent> <wwn> <new-lun>"
-            err "  lun clear-pending <wwn>|--all"
-            err "  lun status [<wwn>]"
+            err "  lun set <extent> <group> <new-lun>"
+            err "  lun clear-pending <group>|--all"
+            err "  lun status [<group>]"
             return 1
             ;;
     esac
@@ -5005,21 +5061,191 @@ if '${profile}' in entry:
     esac
 }
 
+# ─── Group management ─────────────────────────────────────────────────────────
+cmd_group() {
+    local subcmd="${1:-}"; shift || true
+    case "$subcmd" in
+
+        create)
+            local name="${1:-}"
+            [[ -z "$name" ]] && { err "Usage: group create <name>"; return 1; }
+            local exists
+            exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+except: pass
+")
+            [[ "$exists" == "yes" ]] && { err "Group '${name}' already exists"; return 1; }
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d.setdefault('assignments', {})['${name}'] = {'initiators': [], 'extents': [], 'luns': {}}
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            ok "Group '${name}' created"
+            ;;
+
+        delete)
+            local name="${1:-}"
+            [[ -z "$name" ]] && { err "Usage: group delete <name>"; return 1; }
+            local exists
+            exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+except: pass
+")
+            [[ "$exists" != "yes" ]] && { err "Group '${name}' not found"; return 1; }
+            warn "Deleting group '${name}' and all its LUN assignments"
+            confirm_or_abort "Proceed?"
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d.get('assignments', {}).pop('${name}', None)
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            ok "Group '${name}' deleted. Run 'sync' to update scst.conf."
+            ;;
+
+        add)
+            local name="${1:-}" wwn="${2:-}"
+            [[ -z "$name" || -z "$wwn" ]] && { err "Usage: group add <name> <wwn>"; return 1; }
+            if [[ ! "$wwn" =~ ^([0-9a-fA-F]{2}:){7}[0-9a-fA-F]{2}$ ]]; then
+                err "Invalid WWN format: ${wwn} (expected xx:xx:xx:xx:xx:xx:xx:xx)"
+                return 1
+            fi
+            wwn=$(echo "$wwn" | tr '[:upper:]' '[:lower:]')
+            local exists
+            exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+except: pass
+")
+            [[ "$exists" != "yes" ]] && { err "Group '${name}' not found. Use 'group create' first."; return 1; }
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+grp = d['assignments'].setdefault('${name}', {'initiators': [], 'extents': [], 'luns': {}})
+if '${wwn}' not in grp.setdefault('initiators', []):
+    grp['initiators'].append('${wwn}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            ok "Added ${wwn} to group '${name}'. Run 'sync' to update scst.conf."
+            ;;
+
+        remove)
+            local name="${1:-}" wwn="${2:-}"
+            [[ -z "$name" || -z "$wwn" ]] && { err "Usage: group remove <name> <wwn>"; return 1; }
+            wwn=$(echo "$wwn" | tr '[:upper:]' '[:lower:]')
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+grp = d.get('assignments', {}).get('${name}', {})
+inits = grp.get('initiators', [])
+if '${wwn}' in inits:
+    inits.remove('${wwn}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            ok "Removed ${wwn} from group '${name}'. Run 'sync' to update scst.conf."
+            ;;
+
+        rename)
+            local old_name="${1:-}" new_name="${2:-}"
+            [[ -z "$old_name" || -z "$new_name" ]] && { err "Usage: group rename <old> <new>"; return 1; }
+            local exists new_exists
+            exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${old_name}' in d.get('assignments', {}) else 'no')
+except: pass
+")
+            [[ "$exists" != "yes" ]] && { err "Group '${old_name}' not found"; return 1; }
+            new_exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${new_name}' in d.get('assignments', {}) else 'no')
+except: pass
+")
+            [[ "$new_exists" == "yes" ]] && { err "Group '${new_name}' already exists"; return 1; }
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+assignments = d.get('assignments', {})
+assignments['${new_name}'] = assignments.pop('${old_name}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            ok "Group renamed '${old_name}' -> '${new_name}'. Run 'sync' to update scst.conf."
+            ;;
+
+        show)
+            local name="${1:-}"
+            [[ -z "$name" ]] && { err "Usage: group show <name>"; return 1; }
+            hdr "Group: ${name}"
+            python3 - "${CONFIG}" "${name}" << 'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    grp = d.get('assignments', {}).get(sys.argv[2])
+    if not grp:
+        print('Group not found')
+        sys.exit(0)
+    inits = grp.get('initiators', [])
+    extents = grp.get('extents', [])
+    luns = grp.get('luns', {})
+    print('Initiators:')
+    for i in inits:
+        print(f'  {i}')
+    if not inits:
+        print('  (none)')
+    print('LUN Mappings:')
+    for idx, ext in enumerate(extents):
+        lun_id = luns.get(ext, idx)
+        print(f'  LUN {lun_id}: {ext}')
+    if not extents:
+        print('  (none)')
+except Exception as e:
+    print(f'error: {e}')
+PYEOF
+            divider
+            ;;
+
+        *)
+            err "Usage: group <create|delete|add|remove|rename|show>"
+            err "  group create <name>          Create an empty named group"
+            err "  group delete <name>          Delete group and all its LUN assignments"
+            err "  group add    <name> <wwn>    Add an initiator WWN to a group"
+            err "  group remove <name> <wwn>    Remove an initiator WWN from a group"
+            err "  group rename <old>  <new>    Rename a group"
+            err "  group show   <name>          Show group members and LUN mappings"
+            return 1
+            ;;
+    esac
+}
+
 # ─── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     hdr "qle_adm.sh v${VERSION} - QLogic FC Target Manager for TrueNAS SCALE"
     printf "%b\n" "$(cat << USAGE_EOF
 Status       : status
                stats  [--watch] [--wide]
-               list-hba  list-ports  list-initiators  list-extents  list-assignments  list-all
-               shortcuts: st  sw  si  lh  lp  li  le  la  ll
+               list-hba  list-ports  list-initiators  list-extents  list-groups  list-all
+               shortcuts: st  sw  si  lh  lp  li  le  lg  ll
 
 Port         : port  enable | disable  <wwn> | --port N
 
 LUN Mapping  : open     <extent> | --ext N
                close    <extent> | --ext N
-               assign   <extent> | --ext N  <wwn> | --init N  [lun]
-               unassign <extent> | --ext N  <wwn> | --init N
+               assign   <extent> | --ext N  <group> | --group <name>  [lun]
+               unassign <extent> | --ext N  <group> | --group <name>
+
+Group Mgmt   : group  create | delete | add | remove | rename | show
 
 LUN Staging  : lun  set | clear-pending | status
 
@@ -5041,7 +5267,7 @@ Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
                     grep <pattern> | path | status
 
 Global       : examples  help  version
-               --port N   --init N   --ext N
+               --port N   --group <name>   --ext N
                --dry-run  --yes  --verbose  --home <path>
 USAGE_EOF
 )"
@@ -5064,7 +5290,7 @@ ${CYN}Status:${NC}
   list-initiators                Connected initiators with IO stats; seen history always shown  (li)
   list-extents                   SCST extents with size, config state, serial number,  (le)
                                  and live sysfs state [no sysfs|mapped|connected|active]
-  list-assignments               Per-initiator LUN mappings    (la)
+  list-groups                    Per-group LUN mappings with initiator members    (lg)
   list-all                       Runs all list commands in sequence    (ll)
 
 ${CYN}Port Management:${NC}
@@ -5074,18 +5300,26 @@ ${CYN}Port Management:${NC}
 ${CYN}LUN Mapping:${NC}
   open  <extent>|--ext N         Map extent to default group (all initiators), LUN auto
   close <extent>|--ext N         Remove from default group
-  assign   <extent>|--ext N  <wwn>|--init N  [lun]
-                                 Map extent to a specific initiator's group
-  unassign <extent>|--ext N  <wwn>|--init N
-                                 Remove per-initiator mapping
+  assign   <extent>|--ext N  <group>|--group <name>  [lun]
+                                 Map extent to a named group at an optional LUN number
+  unassign <extent>|--ext N  <group>|--group <name>
+                                 Remove an extent from a named group
+
+${CYN}Group Management:${NC}
+  group create <name>            Create an empty named group
+  group delete <name>            Delete a group and all its LUN assignments
+  group add    <name> <wwn>      Add an initiator WWN to a group
+  group remove <name> <wwn>      Remove an initiator WWN from a group
+  group rename <old>  <new>      Rename a group (updates scst.conf on next sync)
+  group show   <name>            Show group members and current LUN mappings
 
 ${CYN}LUN Staging:${NC}
-  lun set <extent> <wwn> <lun>  Stage a deferred LUN number change. Writes to pending_luns
+  lun set <extent> <group> <lun> Stage a deferred LUN number change. Writes to pending_luns
                                  in config.json; does not touch live sysfs. Multiple lun set
                                  calls can be staged; validated as a unit at apply time.
                                  Setting the current live LUN number cancels any pending change.
-  lun clear-pending <wwn>|--all Clear all staged pending LUN changes for an initiator or all.
-  lun status [<wwn>]            Show pending LUN changes and merged desired state with
+  lun clear-pending <group>|--all Clear all staged pending LUN changes for a group or all.
+  lun status [<group>]          Show pending LUN changes and merged desired state with
                                  conflict detection. Prints READY or NOT READY.
 
 ${CYN}WWN Names:${NC}
@@ -5115,7 +5349,7 @@ ${CYN}Operation:${NC}
                                  wwn_names to new WWNs by port index; applies live if
                                  SCST is running. Writes hba_identity on completion.
   hba swap --force               Cross-ISP or port count reduction: clears enabled_ports,
-                                 preserves assignments/extents/initiator names. Run
+                                 preserves assignments, extents, groups, and initiator names. Run
                                  'port enable' to re-activate targets after force-swap.
   reset <seen|ports|mappings|names|all>
                                  Clear accumulated state from config.json and live sysfs
@@ -5189,7 +5423,7 @@ ${CYN}Global Options:${NC}
 
 ${CYN}Index Selection:${NC}
   --port N     FC port by index from list-ports
-  --init N     Initiator by index from list-initiators (active or seen)
+  --group <name>   Group name (or WWN for single-initiator groups) for assign/unassign
   --ext N      Extent by index from list-extents
 HELP_EOF
 )"
@@ -5224,14 +5458,19 @@ EX
   # Expose an extent to all initiators (open access)
   qle_adm.sh open --ext 0
 
-  # Or assign to a specific initiator only
-  qle_adm.sh assign --ext 0 --init 0
+  # Create a named group and add initiators
+  qle_adm.sh group create esxi_side_a
+  qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:1f
+  qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:7f
+
+  # Assign an extent to the group
+  qle_adm.sh assign --ext 0 --group esxi_side_a
 
   # Assign with explicit LUN number
-  qle_adm.sh assign --ext 1 --init 0 2
+  qle_adm.sh assign --ext 1 --group esxi_side_a 2
 
   # Remove a mapping
-  qle_adm.sh unassign --ext 0 --init 0
+  qle_adm.sh unassign --ext 0 --group esxi_side_a
 
 EX
 
@@ -5239,7 +5478,7 @@ EX
     cat << 'EX'
 
   # Stage a LUN number change (does not touch live sessions)
-  qle_adm.sh lun set g1ed2-debian 51:40:2e:c0:01:7c:6f:1c 3
+  qle_adm.sh lun set g1ed2-debian esxi_side_a 3
 
   # Review pending changes and conflict status
   qle_adm.sh lun status
@@ -5248,7 +5487,7 @@ EX
   qle_adm.sh sync --restart
 
   # Cancel all pending changes for an initiator
-  qle_adm.sh lun clear-pending 51:40:2e:c0:01:7c:6f:1c
+  qle_adm.sh lun clear-pending esxi_side_a
 
 EX
 
@@ -5374,7 +5613,7 @@ EX
 
   qle_adm.sh --dry-run sync
   qle_adm.sh --dry-run fw save-os
-  qle_adm.sh --dry-run assign --ext 0 --init 0
+  qle_adm.sh --dry-run assign --ext 0 --group esxi_side_a
 
 EX
     _divider_force
@@ -5384,7 +5623,7 @@ EX
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
     local args=()
-    local opt_port="" opt_init="" opt_ext=""
+    local opt_port="" opt_group="" opt_ext=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -5396,7 +5635,7 @@ main() {
                         LOG="${QLE_ADM_HOME}/qle_adm.log"
                         shift 2 ;;
             --port)     opt_port="$2"; shift 2 ;;
-            --init)     opt_init="$2"; shift 2 ;;
+            --group)    opt_group="$2"; shift 2 ;;
             --ext)      opt_ext="$2"; shift 2 ;;
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
@@ -5459,7 +5698,8 @@ main() {
         list-ports|lp)   cmd_list_ports ;;
         list-extents|le) cmd_list_extents ;;
         list-initiators|li) cmd_list_initiators "${rest[@]}" ;;
-        list-assignments|la) cmd_list_assignments ;;
+        list-groups|lg) cmd_list_groups ;;
+        group)           cmd_group "${rest[@]}" ;;
         list-all|ll)     cmd_list_all ;;
         port)
             local sub="${rest[0]:-}"
@@ -5469,8 +5709,8 @@ main() {
             ;;
         open)    cmd_open    "${rest[0]:-}" "$opt_ext" ;;
         close)   cmd_close   "${rest[0]:-}" "$opt_ext" ;;
-        assign)  cmd_assign  "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_init" "${rest[2]:-auto}" ;;
-        unassign) cmd_unassign "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_init" ;;
+        assign)  cmd_assign  "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_group" "${rest[2]:-auto}" ;;
+        unassign) cmd_unassign "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_group" ;;
         fw)         cmd_fw         "${rest[@]}" ;;
         isp-params) cmd_isp_params "${rest[@]}" ;;
         name)       cmd_name       "${rest[@]}" ;;

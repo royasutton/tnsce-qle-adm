@@ -238,7 +238,7 @@ from the install directory.
 | `--verbose` | Extra diagnostic output |
 | `--home <path>` | Override QLE_ADM_HOME for this invocation |
 | `--port N` | Select FC port by index from `list-ports` |
-| `--init N` | Select initiator by index from `list-initiators` |
+| `--group <name>` | Select initiator by index from `list-initiators` |
 | `--ext N` | Select extent by index from `list-extents` |
 
 ### Environment variables
@@ -269,7 +269,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
-| `list-assignments` | `la` | Per-initiator LUN mappings |
+| `list-groups` | `la` | Per-initiator LUN mappings |
 | `list-all` | `ll` | All list commands in sequence |
 
 ### Port management
@@ -290,9 +290,9 @@ Writes to both sysfs (immediate) and config.json (persistent).
 ./qle_adm.sh close --ext 0
 
 # Per-initiator: specific initiator only
-./qle_adm.sh assign   --ext 0 --init 0
+./qle_adm.sh assign   --ext 0 --group esxi_side_a
 ./qle_adm.sh assign   --ext 0 <initiator-wwn>
-./qle_adm.sh unassign --ext 0 --init 0
+./qle_adm.sh unassign --ext 0 --group esxi_side_a
 ```
 
 All mapping commands write to both sysfs (immediate) and config.json
@@ -752,7 +752,7 @@ need restoring:
 ./qle_adm.sh list-initiators
 
 # Confirm LUN is mapped
-./qle_adm.sh list-assignments
+./qle_adm.sh list-groups
 
 # Rescan on initiator
 echo "- - -" > /sys/class/scsi_host/host<N>/scan
