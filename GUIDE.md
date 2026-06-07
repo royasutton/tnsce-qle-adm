@@ -269,7 +269,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
 | `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
-| `list-groups` | `la` | Per-initiator LUN mappings |
+| `list-mapping` | `lm` | Full LUN mapping topology: groups, initiators, LUN mappings, port associations, and a port-centric summary. `list-groups` / `lg` retained as aliases. |
 | `list-all` | `ll` | All list commands in sequence |
 
 ### Port management
@@ -534,7 +534,7 @@ After migration, all groups are attached to all ports. For dual-fabric or asymme
 
 ```bash
 # Review what was created
-qle_adm.sh list-groups
+qle_adm.sh list-mapping
 
 # Detach groups from ports where they should not be active
 qle_adm.sh port detach 21:00:...:d6 esxi_side_a
@@ -882,7 +882,7 @@ need restoring:
 ./qle_adm.sh list-initiators
 
 # Confirm LUN is mapped
-./qle_adm.sh list-groups
+./qle_adm.sh list-mapping
 
 # Rescan on initiator
 echo "- - -" > /sys/class/scsi_host/host<N>/scan

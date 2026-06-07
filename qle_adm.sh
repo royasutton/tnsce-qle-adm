@@ -617,7 +617,7 @@ except: pass
 ")
     if [[ "$exists" != "yes" ]]; then
         err "Group '${arg}' not found in config.json"
-        err "Use 'group create <name>' to define a new group, or 'list-groups' to see existing ones."
+        err "Use 'group create <name>' to define a new group, or 'list-mapping' to see existing ones."
         exit 1
     fi
     echo "$arg"
@@ -2380,12 +2380,12 @@ CSEOF
                         echo -e "${YLW}All groups were attached to all ports by default.${NC}"
                         echo -e "${YLW}Review and refine port associations for your fabric topology:${NC}"
                         echo ""
-                        echo -e "  qle_adm.sh list-groups             # review groups and port attachments"
+                        echo -e "  qle_adm.sh list-mapping             # review groups and port attachments"
                         echo -e "  qle_adm.sh port detach <port> <group>  # remove unwanted associations"
                         echo -e "  qle_adm.sh port attach <port> <group>  # add specific associations"
                     fi
                     echo ""
-                    echo -e "${DIM}Run 'list-groups' to review the current group configuration.${NC}"
+                    echo -e "${DIM}Run 'list-mapping' to review the current group and port configuration.${NC}"
                 fi
                 log "deploy migrate: schema ${detected_schema} → ${CONFIG_SCHEMA}"
             fi
@@ -3147,7 +3147,7 @@ except: pass
             warn "  ${ext}"
         done <<< "$stale_exts"
         warn "The WUI may have removed the underlying device. Run 'unassign <extent> <wwn>' to clean up."
-        warn "Use 'list-extents' or 'list-groups' to identify stale entries."
+        warn "Use 'list-extents' or 'list-mapping' to identify stale entries."
     fi
 
     local port_count; port_count=$(cfg_get_list "enabled_ports" | grep -c . || true)
@@ -4025,7 +4025,7 @@ cmd_list_all() {
     cmd_list_ports
     cmd_list_extents
     cmd_list_initiators
-    cmd_list_groups
+    cmd_list_mapping
     _divider_force
 }
 
@@ -4309,11 +4309,12 @@ except: pass
     divider
 }
 
-cmd_list_groups() {
-    hdr "LUN Assignments"
+cmd_list_mapping() {
+    hdr "LUN Mapping Topology"
 
     local scst_devices; scst_devices=$(get_scst_conf_devices)
 
+    # ── Open access ────────────────────────────────────────────────────────────
     echo -e "\n${CYN}Open Access (all initiators):${NC}"
     local open_extents; open_extents=$(cfg_get_list "open_extents")
     if [[ -z "$open_extents" ]]; then
@@ -4331,10 +4332,10 @@ cmd_list_groups() {
         done <<< "$open_extents"
     fi
 
-    echo -e "\n${CYN}Group Assignments:${NC}"
-    local grp_list _tmp2
-    _tmp2=$(mktemp)
-    cat > "$_tmp2" << 'PYEOF'
+    # ── Group definitions ──────────────────────────────────────────────────────
+    echo -e "\n${CYN}Groups:${NC}"
+    local _tmp; _tmp=$(mktemp)
+    cat > "$_tmp" << 'PYEOF'
 import json, sys
 cfg = sys.argv[1]
 try:
@@ -4344,54 +4345,89 @@ try:
     for grp, data in groups.items():
         luns_map = data.get("luns", {})
         initiators = data.get("initiators", [])
-        if not luns_map:
-            continue
         pairs = " ".join(str(lun_id) + ":" + ext for ext, lun_id in luns_map.items())
         inits = ",".join(initiators)
         ports = ",".join(p for p, gs in port_groups.items() if grp in gs)
-        print(grp + "|" + inits + "|" + pairs + "|" + ports)
+        mapped = "yes" if luns_map else "no"
+        print(grp + "|" + inits + "|" + pairs + "|" + ports + "|" + mapped)
 except: pass
 PYEOF
-    grp_list=$(python3 "$_tmp2" "${CONFIG}" 2>/dev/null)
-    rm -f "$_tmp2"
+    local grp_list; grp_list=$(python3 "$_tmp" "${CONFIG}" 2>/dev/null)
+    rm -f "$_tmp"
     if [[ -z "$grp_list" ]]; then
         echo -e "  ${DIM}(none)${NC}"
     else
         local stale_warned=0
-        while IFS='|' read -r grp inits pairs ports; do
-            echo -e "  ${WHT}${grp}${NC}"
+        while IFS='|' read -r grp inits pairs ports mapped; do
+            if [[ "$mapped" == "no" ]]; then
+                echo -e "  ${WHT}${grp}${NC}  ${DIM}(no LUN mappings)${NC}"
+            else
+                echo -e "  ${WHT}${grp}${NC}"
+            fi
             if [[ -n "$inits" ]]; then
                 IFS=',' read -ra init_arr <<< "$inits"
                 for init_wwn in "${init_arr[@]}"; do
                     local ilbl; ilbl=$(wwn_label "$init_wwn" "initiator")
                     echo -e "    ${DIM}initiator: ${init_wwn} (${ilbl})${NC}"
                 done
+            else
+                echo -e "    ${DIM}initiators: (none)${NC}"
             fi
             if [[ -n "$ports" ]]; then
                 IFS=',' read -ra port_arr <<< "$ports"
                 for port_wwn in "${port_arr[@]}"; do
-                    echo -e "    ${DIM}port: ${port_wwn}${NC}"
+                    local plbl; plbl=$(wwn_label "$port_wwn" "target")
+                    echo -e "    ${DIM}port: ${port_wwn} (${plbl})${NC}"
                 done
             else
                 echo -e "    ${YLW}not attached to any port${NC}"
             fi
-            for pair in $pairs; do
-                local lun ext stale_tag=""
-                lun="${pair%%:*}"
-                ext="${pair#*:}"
-                if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
-                    stale_tag=$'\n'"        ${DIM}run: unassign ${ext} ${grp}${NC}"
-                    stale_warned=1
-                fi
-                echo -e "    LUN ${lun}: ${ext}${stale_tag}"
-            done
+            if [[ -n "$pairs" ]]; then
+                for pair in $pairs; do
+                    local lun ext stale_tag=""
+                    lun="${pair%%:*}"
+                    ext="${pair#*:}"
+                    if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
+                        stale_tag=$'\n'"        ${DIM}run: group unmap ${grp} ${ext}${NC}"
+                        stale_warned=1
+                    fi
+                    echo -e "    LUN ${lun}: ${ext}${stale_tag}"
+                done
+            fi
         done <<< "$grp_list"
         if [[ $stale_warned -eq 1 ]]; then
             echo ""
-            echo -e "  ${YLW}Stale assignments exist. The extent was removed from the WUI without${NC}"
-            echo -e "  ${YLW}going through qle_adm. Run 'unassign <extent> <group>' to clean up.${NC}"
+            echo -e "  ${YLW}Stale mappings exist. The extent was removed from the WUI without${NC}"
+            echo -e "  ${YLW}going through qle_adm. Run 'group unmap <group> <extent>' to clean up.${NC}"
         fi
     fi
+
+    # ── Port-centric summary ───────────────────────────────────────────────────
+    echo -e "\n${CYN}Port Associations:${NC}"
+    local enabled_ports; enabled_ports=$(cfg_get_list "enabled_ports")
+    if [[ -z "$enabled_ports" ]]; then
+        echo -e "  ${DIM}(no ports enabled)${NC}"
+    else
+        while IFS= read -r pwwn; do
+            [[ -z "$pwwn" ]] && continue
+            local plbl; plbl=$(wwn_label "$pwwn" "target")
+            local port_grps
+            port_grps=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    gs = d.get('port_groups', {}).get('${pwwn}', [])
+    print(' '.join(gs) if gs else '')
+except: pass
+")
+            if [[ -n "$port_grps" ]]; then
+                echo -e "  ${WHT}${pwwn}${NC} (${CYN}${plbl}${NC}): ${port_grps}"
+            else
+                echo -e "  ${WHT}${pwwn}${NC} (${CYN}${plbl}${NC}): ${YLW}(no groups attached)${NC}"
+            fi
+        done <<< "$enabled_ports"
+    fi
+
     divider
 }
 
@@ -5103,7 +5139,7 @@ print('yes' if '${ext}' in exts else 'no')
 ")
             [[ "$assigned" == "yes" ]] || {
                 err "Extent '${ext}' is not assigned to ${wwn}"
-                err "Use 'list-groups' to see current group assignments"
+                err "Use 'list-mapping' to see current group and port assignments"
                 return 1
             }
 
@@ -5665,8 +5701,8 @@ usage() {
     printf "%b\n" "$(cat << USAGE_EOF
 Status       : status
                stats  [--watch] [--wide]
-               list-hba  list-ports  list-initiators  list-extents  list-groups  list-all
-               shortcuts: st  sw  si  lh  lp  li  le  lg  ll
+               list-hba  list-ports  list-initiators  list-extents  list-mapping  list-all
+               shortcuts: st  sw  si  lh  lp  li  le  lm  ll
 
 Port         : port  enable [--attach-all] | disable | attach | detach | show  <wwn> | --port N
 
@@ -5719,7 +5755,11 @@ ${CYN}Status:${NC}
   list-initiators                Connected initiators with IO stats; seen history always shown  (li)
   list-extents                   SCST extents with size, config state, serial number,  (le)
                                  and live sysfs state [no sysfs|mapped|connected|active]
-  list-groups                    Per-group LUN mappings with initiator members    (lg)
+  list-mapping                   Full LUN mapping topology: groups with initiators,
+                                 LUN mappings, and port associations. Groups with no
+                                 mappings shown as unconfigured. Port-centric summary
+                                 at the end shows the group matrix per enabled port.
+                                 (lm)
   list-all                       Runs all list commands in sequence    (ll)
 
 ${CYN}Port Management:${NC}
@@ -6149,7 +6189,7 @@ main() {
         list-ports|lp)   cmd_list_ports ;;
         list-extents|le) cmd_list_extents ;;
         list-initiators|li) cmd_list_initiators "${rest[@]}" ;;
-        list-groups|lg) cmd_list_groups ;;
+        list-mapping|lm) cmd_list_mapping ;;
         group)           cmd_group "${rest[@]}" ;;
         list-all|ll)     cmd_list_all ;;
         port)
