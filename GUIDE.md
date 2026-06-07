@@ -438,6 +438,7 @@ authoritative source for param drift detection.
 | `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
 | `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new. Writes `hba_identity` on completion. |
 | `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
+| `deploy migrate [--apply]` | Migrate config.json to current schema. Defaults to dry-run; use `--apply` to write. Backs up config first. |
 | `deploy migrate [--apply]` | Migrate config.json to the current schema. Defaults to dry-run preview; use `--apply` to write. Backs up config before writing (`config.json.bak`, `.bak.1`, `.bak.2` ...). |
 
 ### Config Schema Migration
@@ -472,10 +473,10 @@ A backup is written automatically before any changes are made. If
 `config.json.bak` already exists, the backup is numbered sequentially
 (`config.json.bak.1`, `.bak.2`, etc.).
 
-#### Schema 1 → 2 (v5.x → v6.0)
+#### Schema 1 → 2 (v5.x → v7.0)
 
 This migration converts the old per-initiator assignment scheme to the
-group-based schema introduced in v6.0.
+group-based schema introduced in v7.0.
 
 **What changes automatically:**
 
@@ -510,6 +511,38 @@ qle_adm.sh assign <extent> esxi_side_a
 # Delete the old single-initiator groups
 qle_adm.sh group delete 20:00:00:25:b5:c0:a0:1f
 qle_adm.sh group delete 20:00:00:25:b5:c0:a0:7f
+
+# Sync to update scst.conf
+qle_adm.sh sync
+```
+
+
+#### Schema 2 → 3 (v6.x → v7.0)
+
+This migration introduces `groups` and `port_groups`, replacing the `assignments` key.
+
+**What changes automatically:**
+
+- Each entry in `assignments` becomes a named entry in `groups` (initiators, luns, and pending_luns preserved)
+- `port_groups` is built by attaching all groups to all currently enabled ports (preserving the "every group on every port" default)
+- `assignments` key is removed
+- `config_schema: 3` and `version: 7.0` are set
+
+**What requires manual follow-up:**
+
+After migration, all groups are attached to all ports. For dual-fabric or asymmetric topologies, refine the port associations:
+
+```bash
+# Review what was created
+qle_adm.sh list-groups
+
+# Detach groups from ports where they should not be active
+qle_adm.sh port detach 21:00:...:d6 esxi_side_a
+qle_adm.sh port detach 21:00:...:d7 esxi_side_a
+
+# Attach the correct side-B groups to those ports
+qle_adm.sh port attach 21:00:...:d6 esxi_side_b
+qle_adm.sh port attach 21:00:...:d7 esxi_side_b
 
 # Sync to update scst.conf
 qle_adm.sh sync

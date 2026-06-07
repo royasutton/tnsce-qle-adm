@@ -12,11 +12,11 @@
 #   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
 #
 # Requires: bash, python3 (JSON only)
-# Version: 6.0
+# Version: 7.0
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="6.0"
-CONFIG_SCHEMA=2   # current schema version written by cfg_init
+VERSION="7.0"
+CONFIG_SCHEMA=3   # current schema version written by cfg_init
 
 # Migration eligibility table.
 # Key format: "from_schema:to_schema"
@@ -25,8 +25,8 @@ CONFIG_SCHEMA=2   # current schema version written by cfg_init
 # For multi-hop migrations (e.g. 1->2->3) entries are chained automatically.
 declare -A MIGRATION_TABLE=(
     ["1:2"]="eligible"
-    # ["2:3"]="eligible"
-    # ["2:4"]="ineligible:structural change - manual rebuild required"
+    ["2:3"]="eligible"
+    # ["3:4"]="ineligible:structural change - manual rebuild required"
 )
 
 QLE_ADM_HOME="${QLE_ADM_HOME:-}"
@@ -201,11 +201,11 @@ cfg_init() {
 import json
 d = {
     'version': '${VERSION}',
-    'config_schema': 2,
+    'config_schema': 3,
     'mode': 'open',
     'enabled_ports': [],
+    'port_groups': {},
     'open_extents': [],
-    'assignments': {},
     'groups': {},
     'seen_initiators': {},
     'isp_params': {
@@ -242,13 +242,15 @@ except Exception as e:
     print("err:read:" + str(e))
     sys.exit(0)
 schema = d.get('config_schema', None)
-if schema == 2:
+if schema == 3:
     print("ok")
     sys.exit(0)
 assignments = d.get('assignments', {})
 wwn_keys = [k for k in assignments if WWN_RE.match(k.lower())]
 if wwn_keys:
     print("err:old_wwn_keys")
+elif schema == 2:
+    print("err:schema_2")
 else:
     print("err:schema_" + str(schema))
 CSEOF
@@ -260,7 +262,7 @@ CSEOF
     err ""
     if [[ "$result" == "err:old_wwn_keys" ]]; then
         err "The assignments section uses per-initiator WWN keys (pre-6.0 schema)."
-        err "This version requires the group-based schema (config_schema: 2)."
+        err "This version requires config_schema: 3 (group + port_groups schema)."
     elif [[ "$result" == "err:schema_None" || "$result" == "err:schema_1" ]]; then
         err "config_schema key is missing or set to an old value."
         err "This version requires config_schema: 2 (introduced in v6.0)."
@@ -610,7 +612,7 @@ resolve_group() {
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${arg}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${arg}' in d.get('groups', {}) else 'no')
 except: pass
 ")
     if [[ "$exists" != "yes" ]]; then
@@ -1662,6 +1664,86 @@ PYEOF
     ok "config.json written (schema 2, version ${VERSION})"
 }
 
+migrate_2_to_3() {
+    # Schema 2 → 3: assignments + enabled_ports → groups + port_groups.
+    # Each entry in assignments becomes a groups entry (initiators + luns preserved).
+    # port_groups is built by associating all groups with all currently enabled ports
+    # (preserves the "every group on every port" default; user refines afterwards).
+    # assignments key is removed. config_schema set to 3, version stamped.
+    local cfg="$1" dry_run="$2"
+    local tmp_script; tmp_script=$(mktemp /tmp/qle_migrate.XXXXXX.py)
+    cat > "$tmp_script" << 'PYEOF'
+import json, sys
+
+cfg_path   = sys.argv[1]
+script_ver = sys.argv[2]
+
+try:
+    d = json.load(open(cfg_path))
+except Exception as e:
+    print("err:" + str(e)); sys.exit(1)
+
+old_assignments = d.get('assignments', {})
+enabled_ports   = d.get('enabled_ports', [])
+new_groups      = {}
+changes         = []
+
+for grp_name, data in old_assignments.items():
+    new_entry = {
+        'initiators':   data.get('initiators', []),
+        'luns':         data.get('luns', {}),
+        'pending_luns': data.get('pending_luns', {}),
+    }
+    new_groups[grp_name] = new_entry
+    n_inits = len(new_entry['initiators'])
+    n_luns  = len(new_entry['luns'])
+    changes.append(f"  group '{grp_name}': {n_inits} initiator(s), {n_luns} LUN mapping(s)")
+
+# Build port_groups: every group on every currently enabled port
+new_port_groups = {}
+for port in enabled_ports:
+    new_port_groups[port] = list(new_groups.keys())
+    changes.append(f"  port '{port}': attached {len(new_groups)} group(s)")
+
+d['groups']      = new_groups
+d['port_groups'] = new_port_groups
+d.pop('assignments', None)
+d['config_schema'] = 3
+d['version']       = script_ver
+
+preview = json.dumps(d, indent=2)
+print("ok")
+for c in changes:
+    print(c)
+print("---JSON---")
+print(preview)
+PYEOF
+
+    local result; result=$(python3 "$tmp_script" "$cfg" "${VERSION}")
+    local rc=$?; rm -f "$tmp_script"
+    [[ $rc -ne 0 || "$result" == err:* ]] && { err "Migration failed: ${result#err:}"; return 1; }
+
+    local summary="" json_out="" in_json=0
+    while IFS= read -r line; do
+        if [[ "$line" == "---JSON---" ]]; then in_json=1; continue; fi
+        if [[ $in_json -eq 1 ]]; then json_out+="${line}"$'\n'
+        elif [[ "$line" != "ok" ]]; then summary+="${line}"$'\n'; fi
+    done <<< "$result"
+
+    echo -e "${CYN}Changes:${NC}"
+    [[ -n "$summary" ]] && echo "$summary" || echo "  (nothing to migrate)"
+
+    if [[ $dry_run -eq 1 ]]; then
+        echo -e "${CYN}Resulting config.json (preview):${NC}"
+        echo "$json_out"
+        return 0
+    fi
+
+    _migrate_backup "$cfg"
+    printf '%s' "$json_out" > "$cfg"
+    ok "config.json written (schema 3, version ${VERSION})"
+}
+
 cmd_deploy() {
     local subcmd="${1:-status}"; shift || true
 
@@ -2272,17 +2354,36 @@ CSEOF
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    for g in d.get('assignments', {}).keys():
+    src = d.get('groups', d.get('assignments', {}))
+    for g in src.keys():
         print(g)
 except: pass
 ")
                 if [[ -n "$grp_list" ]]; then
-                    echo -e "${YLW}Group names were derived from initiator WWNs during migration.${NC}"
-                    echo -e "${YLW}Rename them to meaningful names with:${NC}"
+                    echo -e "${YLW}Post-migration steps:${NC}"
                     echo ""
-                    while IFS= read -r grp; do
-                        echo -e "  qle_adm.sh group rename ${grp} <new-name>"
-                    done <<< "$grp_list"
+                    local detected_schema_post
+                    detected_schema_post=$(python3 - "${CONFIG}" << 'CSEOF'
+import json, sys
+try: print(json.load(open(sys.argv[1])).get("config_schema", "?"))
+except: print("?")
+CSEOF
+)
+                    if [[ "$detected_schema_post" == "2" ]]; then
+                        echo -e "${YLW}Group names were derived from initiator WWNs.${NC}"
+                        echo -e "${YLW}Rename them to meaningful names:${NC}"
+                        echo ""
+                        while IFS= read -r grp; do
+                            echo -e "  qle_adm.sh group rename ${grp} <new-name>"
+                        done <<< "$grp_list"
+                    elif [[ "$detected_schema_post" == "3" ]]; then
+                        echo -e "${YLW}All groups were attached to all ports by default.${NC}"
+                        echo -e "${YLW}Review and refine port associations for your fabric topology:${NC}"
+                        echo ""
+                        echo -e "  qle_adm.sh list-groups             # review groups and port attachments"
+                        echo -e "  qle_adm.sh port detach <port> <group>  # remove unwanted associations"
+                        echo -e "  qle_adm.sh port attach <port> <group>  # add specific associations"
+                    fi
                     echo ""
                     echo -e "${DIM}Run 'list-groups' to review the current group configuration.${NC}"
                 fi
@@ -2331,8 +2432,9 @@ except Exception as e:
     sys.exit(1)
 
 enabled_ports = d.get('enabled_ports', [])
+port_groups   = d.get('port_groups', {})
 open_extents  = d.get('open_extents', [])
-assignments   = d.get('assignments', {})
+groups        = d.get('groups', {})
 
 lines = []
 lines.append('TARGET_DRIVER qla2x00t {')
@@ -2351,19 +2453,20 @@ for port_idx, wwn in enumerate(enabled_ports):
     if open_extents:
         lines.append('')
 
-    for grp_name, data in assignments.items():
-        extents    = data.get('extents', [])
+    active_grp_names = port_groups.get(wwn, [])
+    for grp_name in active_grp_names:
+        data = groups.get(grp_name, {})
         luns       = data.get('luns', {})
+        extents    = list(luns.keys())
         initiators = data.get('initiators', [])
-        if not extents:
+        if not luns:
             continue
         lines.append(f'        GROUP {grp_name} {{')
         for init_wwn in initiators:
             lines.append(f'            INITIATOR {init_wwn}')
         if initiators:
             lines.append('')
-        for ext in extents:
-            lun_id = luns.get(ext, extents.index(ext))
+        for ext, lun_id in luns.items():
             lines.append(f'            LUN {lun_id} {ext}')
         lines.append('        }')
         lines.append('')
@@ -2948,7 +3051,7 @@ DROPIN
         pending_wwns=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-for wwn, data in d.get('assignments', {}).items():
+for wwn, data in d.get('groups', {}).items():
     if data.get('pending_luns'):
         print(wwn)
 " 2>/dev/null || true)
@@ -2958,7 +3061,7 @@ for wwn, data in d.get('assignments', {}).items():
                 valid=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-a = d.get('assignments', {}).get('${wwn}', {})
+a = d.get('groups', {}).get('${wwn}', {})
 luns = dict(a.get('luns', {}))
 pending = dict(a.get('pending_luns', {}))
 merged = {}
@@ -2992,7 +3095,7 @@ print('ok')
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-for wwn, data in d.get('assignments', {}).items():
+for wwn, data in d.get('groups', {}).items():
     pending = data.get('pending_luns', {})
     if pending:
         for ext, n in pending.items():
@@ -3011,7 +3114,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
         has_pending=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-total = sum(len(data.get('pending_luns', {})) for data in d.get('assignments', {}).values())
+total = sum(len(data.get('pending_luns', {})) for data in d.get('groups', {}).values())
 print(total)
 " 2>/dev/null || echo "0")
         [[ "$has_pending" -gt 0 ]] && \
@@ -3031,8 +3134,8 @@ try:
     cfg_exts = set()
     for ext in d.get('open_extents', []):
         cfg_exts.add(ext)
-    for init, data in d.get('assignments', {}).items():
-        for ext in data.get('extents', []):
+    for grp, data in d.get('groups', {}).items():
+        for ext in data.get('luns', {}).keys():
             cfg_exts.add(ext)
     for ext in sorted(cfg_exts - scst_devs):
         print(ext)
@@ -3973,9 +4076,9 @@ try:
     if '${ext}' in d.get('open_extents', []):
         print('open')
     else:
-        # Check per-initiator assignments
-        for init, data in d.get('assignments', {}).items():
-            if '${ext}' in data.get('extents', []):
+        # Check groups
+        for grp, data in d.get('groups', {}).items():
+            if '${ext}' in data.get('luns', {}):
                 print('assigned')
                 exit()
         print('unmapped')
@@ -3984,7 +4087,7 @@ except:
 ")
         case "$has_assignment" in
             open)     status="${GRN}[open]${NC}" ;;
-            assigned) status="${DIM}[per-init]${NC}" ;;
+            assigned) status="${DIM}[in group]${NC}" ;;
             *)        status="${DIM}[unmapped]${NC}" ;;
         esac
 
@@ -4057,8 +4160,8 @@ except:
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    inits = [i for i,data in d.get('assignments',{}).items() if '${ext}' in data.get('extents',[])]
-    if inits: print(' '.join(inits))
+    grps = [g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{})]
+    if grps: print(' '.join(grps))
 except: pass
 ")
         if [[ -n "$assigned_inits" ]]; then
@@ -4075,7 +4178,7 @@ except: pass
                 done
                 stale_tag="$_cmds"
             fi
-            assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
+            assigned="${CYN}in groups:${NC} $(IFS=', '; echo "${_parts[*]}")"
         fi
         local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
         local size="" serial=""
@@ -4118,8 +4221,8 @@ try:
     cfg_exts = set()
     for ext in d.get('open_extents', []):
         cfg_exts.add(ext)
-    for init, data in d.get('assignments', {}).items():
-        for ext in data.get('extents', []):
+    for grp, data in d.get('groups', {}).items():
+        for ext in data.get('luns', {}).keys():
             cfg_exts.add(ext)
     for ext in sorted(cfg_exts - scst_devs):
         print(ext)
@@ -4133,8 +4236,8 @@ except: pass
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    inits = [i for i,data in d.get('assignments',{}).items() if '${ext}' in data.get('extents',[])]
-    if inits: print(' '.join(inits))
+    grps = [g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{})]
+    if grps: print(' '.join(grps))
 except: pass
 ")
             local assigned=""
@@ -4236,16 +4339,17 @@ import json, sys
 cfg = sys.argv[1]
 try:
     d = json.load(open(cfg))
-    assignments = d.get("assignments", {})
-    for grp, data in assignments.items():
+    groups = d.get("groups", {})
+    port_groups = d.get("port_groups", {})
+    for grp, data in groups.items():
         luns_map = data.get("luns", {})
-        extents = data.get("extents", [])
         initiators = data.get("initiators", [])
-        if not extents:
+        if not luns_map:
             continue
-        pairs = " ".join(str(luns_map.get(ext, i)) + ":" + ext for i, ext in enumerate(extents))
+        pairs = " ".join(str(lun_id) + ":" + ext for ext, lun_id in luns_map.items())
         inits = ",".join(initiators)
-        print(grp + "|" + inits + "|" + pairs)
+        ports = ",".join(p for p, gs in port_groups.items() if grp in gs)
+        print(grp + "|" + inits + "|" + pairs + "|" + ports)
 except: pass
 PYEOF
     grp_list=$(python3 "$_tmp2" "${CONFIG}" 2>/dev/null)
@@ -4254,7 +4358,7 @@ PYEOF
         echo -e "  ${DIM}(none)${NC}"
     else
         local stale_warned=0
-        while IFS='|' read -r grp inits pairs; do
+        while IFS='|' read -r grp inits pairs ports; do
             echo -e "  ${WHT}${grp}${NC}"
             if [[ -n "$inits" ]]; then
                 IFS=',' read -ra init_arr <<< "$inits"
@@ -4262,6 +4366,14 @@ PYEOF
                     local ilbl; ilbl=$(wwn_label "$init_wwn" "initiator")
                     echo -e "    ${DIM}initiator: ${init_wwn} (${ilbl})${NC}"
                 done
+            fi
+            if [[ -n "$ports" ]]; then
+                IFS=',' read -ra port_arr <<< "$ports"
+                for port_wwn in "${port_arr[@]}"; do
+                    echo -e "    ${DIM}port: ${port_wwn}${NC}"
+                done
+            else
+                echo -e "    ${YLW}not attached to any port${NC}"
             fi
             for pair in $pairs; do
                 local lun ext stale_tag=""
@@ -4284,12 +4396,59 @@ PYEOF
 }
 
 cmd_port_enable() {
-    local wwn_arg="${1:-}" port_idx="${2:-}"
+    local wwn_arg="" port_idx="" attach_all=0
+    # Parse args: positional WWN/index and optional --attach-all
+    local _parsed_pos=0
+    for _a in "$@"; do
+        if [[ "$_a" == "--attach-all" ]]; then attach_all=1
+        elif [[ $_parsed_pos -eq 0 && -n "$_a" ]]; then
+            # Could be a WWN or used as port_idx from --port N passed by main
+            wwn_arg="$_a"; _parsed_pos=1
+        fi
+    done
+    # opt_port from main() is passed as second positional
+    port_idx="${2:-}"
     local wwn; wwn=$(resolve_port "$wwn_arg" "$port_idx")
-    [[ -z "$wwn" ]] && { err "Usage: port enable <wwn>|--port N"; return 1; }
+    [[ -z "$wwn" ]] && { err "Usage: port enable <wwn>|--port N [--attach-all]"; return 1; }
     wwn=$(echo "$wwn" | tr '[:upper:]' '[:lower:]')
     info "Enabling port ${wwn}"
     cfg_list_add "enabled_ports" "$wwn"
+    # Initialise port_groups entry (empty by default)
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+pg = d.setdefault('port_groups', {})
+if '${wwn}' not in pg:
+    pg['${wwn}'] = []
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+    if [[ $attach_all -eq 1 ]]; then
+        local all_groups
+        all_groups=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for g in d.get('groups', {}).keys():
+    print(g)
+")
+        if [[ -n "$all_groups" ]]; then
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+pg = d.setdefault('port_groups', {})
+existing = pg.get('${wwn}', [])
+for g in d.get('groups', {}).keys():
+    if g not in existing:
+        existing.append(g)
+pg['${wwn}'] = existing
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            info "All groups attached to port ${wwn}"
+        else
+            info "No groups defined yet - port_groups entry initialised empty"
+        fi
+    else
+        info "Port enabled with no groups attached. Use 'port attach ${wwn} <group>' to add groups."
+    fi
     local tgt_path; tgt_path=$(scst_target_path "$wwn")
     if [[ -d "$tgt_path" ]]; then
         local idx=0
@@ -4311,6 +4470,12 @@ cmd_port_disable() {
     wwn=$(echo "$wwn" | tr '[:upper:]' '[:lower:]')
     warn "Disabling port ${wwn}"
     cfg_list_remove "enabled_ports" "$wwn"
+    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+d.get('port_groups', {}).pop('${wwn}', None)
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
     local tgt_path; tgt_path=$(scst_target_path "$wwn")
     if [[ -d "$tgt_path" ]]; then
         sysfs_write_if_changed "${tgt_path}/enabled" "0"
@@ -4370,114 +4535,21 @@ cmd_close() {
 }
 
 cmd_assign() {
+    # Retired in schema 3. Delegates to 'group map'.
     local ext_arg="${1:-}" ext_idx="${2:-}" grp_arg="${3:-}" grp_name="${4:-}" lun="${5:-auto}"
     local extent; extent=$(resolve_extent "$ext_arg" "$ext_idx")
-    local group; group="${grp_name:-$(resolve_group "$grp_arg")}"
-    [[ -z "$extent" || -z "$group" ]] && { err "Usage: assign <extent>|--ext N <group>|--group <name> [lun]"; return 1; }
-    group=$(echo "$group" | tr '[:upper:]' '[:lower:]')
-
-    # Warn if extent already assigned to another group
-    local existing_grps
-    existing_grps=$(py_json "
-import json
-try:
-    d = json.load(open('${CONFIG}'))
-    others = [g for g,data in d.get('assignments',{}).items()
-              if '${extent}' in data.get('extents',[]) and g != '${group}']
-    if others: print(' '.join(others))
-except: pass
-")
-    if [[ -n "$existing_grps" ]]; then
-        warn "Extent '${extent}' is already assigned to: ${existing_grps}"
-        confirm_or_abort "Assign to '${group}' as well?"
-    fi
-
-    info "Assigning ${extent} to group '${group}'"
-    py_json "
-import json
-d = json.load(open('${CONFIG}'))
-assignments = d.setdefault('assignments', {})
-grp_data = assignments.setdefault('${group}', {'initiators': [], 'extents': [], 'luns': {}})
-if '${extent}' not in grp_data['extents']:
-    grp_data['extents'].append('${extent}')
-    next_lun = len(grp_data['extents']) - 1
-    if '${lun}' != 'auto':
-        next_lun = int('${lun}')
-    grp_data['luns']['${extent}'] = next_lun
-json.dump(d, open('${CONFIG}', 'w'), indent=2)
-"
-    # Apply live to sysfs for all enabled ports
-    while IFS= read -r wwn; do
-        [[ -z "$wwn" ]] && continue
-        local tgt_path; tgt_path=$(scst_target_path "$wwn")
-        [[ -d "$tgt_path" ]] || continue
-        local grp_path="${tgt_path}/ini_groups/${group}"
-        local has_session=0
-        local initiators_in_group
-        initiators_in_group=$(py_json "
-import json
-d = json.load(open('${CONFIG}'))
-for i in d.get('assignments',{}).get('${group}',{}).get('initiators',[]):
-    print(i)
-")
-        while IFS= read -r init_wwn; do
-            [[ -z "$init_wwn" ]] && continue
-            [[ -d "${tgt_path}/sessions/${init_wwn}" ]] && has_session=1 && break
-        done <<< "$initiators_in_group"
-        [[ $has_session -eq 0 && ! -d "$grp_path" ]] && continue
-        if [[ ! -d "$grp_path" ]]; then
-            sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${group}" || true
-            while IFS= read -r init_wwn; do
-                [[ -n "$init_wwn" ]] && \
-                    sysfs_write "${grp_path}/initiators/mgmt" "add ${init_wwn}" || true
-            done <<< "$initiators_in_group"
-        fi
-        py_json "
-import json
-d = json.load(open('${CONFIG}'))
-data = d.get('assignments', {}).get('${group}', {})
-for i, ext in enumerate(data.get('extents', [])):
-    lun = data.get('luns', {}).get(ext, i)
-    print(f'{lun} {ext}')
-" | while read -r lun_id ext_name; do
-            [[ ! -d "${grp_path}/luns/${lun_id}" ]] && \
-                sysfs_write "${grp_path}/luns/mgmt" "add ${ext_name} ${lun_id}" || true
-        done
-    done < <(cfg_get_list "enabled_ports")
-    ok "Assigned ${extent} to group '${group}'"
+    local group; group="${grp_name:-${grp_arg}}"
+    [[ -z "$extent" || -z "$group" ]] && { err "Usage: assign <extent>|--ext N <group> [lun]  (use 'group map' in schema 3)"; return 1; }
+    cmd_group map "$group" "$extent" "$lun"
 }
 
 cmd_unassign() {
+    # Retired in schema 3. Delegates to 'group unmap'.
     local ext_arg="${1:-}" ext_idx="${2:-}" grp_arg="${3:-}" grp_name_arg="${4:-}"
     local extent; extent=$(resolve_extent "$ext_arg" "$ext_idx")
-    local group; group="${grp_name_arg:-$(resolve_group "$grp_arg")}"
-    [[ -z "$extent" || -z "$group" ]] && { err "Usage: unassign <extent>|--ext N <group>|--group <name>"; return 1; }
-    group=$(echo "$group" | tr '[:upper:]' '[:lower:]')
-    warn "Removing ${extent} from group '${group}'"
-    py_json "
-import json
-d = json.load(open('${CONFIG}'))
-grp_data = d.get('assignments', {}).get('${group}', {})
-extents = grp_data.get('extents', [])
-if '${extent}' in extents:
-    extents.remove('${extent}')
-    grp_data.get('luns', {}).pop('${extent}', None)
-json.dump(d, open('${CONFIG}', 'w'), indent=2)
-"
-    while IFS= read -r wwn; do
-        [[ -z "$wwn" ]] && continue
-        local grp_path; grp_path="$(scst_target_path "$wwn")/ini_groups/${group}"
-        [[ -d "$grp_path" ]] || continue
-        for lun_path in "${grp_path}/luns"/*/; do
-            [[ -d "$lun_path" ]] || continue
-            local dev; dev=$(sysfs_read "${lun_path}/device/name" 2>/dev/null || echo "")
-            if [[ "$dev" == "$extent" ]]; then
-                local lun; lun=$(basename "$lun_path")
-                sysfs_write "${grp_path}/luns/mgmt" "del ${lun}" || true
-            fi
-        done
-    done < <(cfg_get_list "enabled_ports")
-    ok "Unassigned ${extent} from group '${group}'"
+    local group; group="${grp_name_arg:-${grp_arg}}"
+    [[ -z "$extent" || -z "$group" ]] && { err "Usage: unassign <extent>|--ext N <group>  (use 'group unmap' in schema 3)"; return 1; }
+    cmd_group unmap "$group" "$extent"
 }
 
 cmd_reset() {
@@ -4538,11 +4610,14 @@ print(count)
 import json
 d = json.load(open('${CONFIG}'))
 oe = len(d.get('open_extents', []))
-ai = len(d.get('assignments', {}))
+ai = len(d.get('groups', {}))
+pi = sum(len(v) for v in d.get('port_groups', {}).values())
 d['open_extents'] = []
-d['assignments'] = {}
+d['groups'] = {}
+for p in d.get('port_groups', {}):
+    d['port_groups'][p] = []
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
-print(f'{oe} open extents, {ai} initiator assignments')
+print(f'{oe} open extents, {ai} groups, {pi} port associations')
 "
     }
 
@@ -4922,7 +4997,7 @@ cmd_lun() {
         py_json "
 import json
 d = json.load(open('${CONFIG}'))
-a = d.get('assignments', {}).get('${wwn}', {})
+a = d.get('groups', {}).get('${wwn}', {})
 luns = dict(a.get('luns', {}))
 pending = dict(a.get('pending_luns', {}))
 merged = {}
@@ -4944,7 +5019,7 @@ for ext, n in sorted(merged.items(), key=lambda x: x[1]):
         py_json "
 import json
 d = json.load(open('${CONFIG}'))
-a = d.get('assignments', {}).get('${wwn}', {})
+a = d.get('groups', {}).get('${wwn}', {})
 luns = dict(a.get('luns', {}))
 pending = dict(a.get('pending_luns', {}))
 merged = {}
@@ -4972,9 +5047,9 @@ print('ok')
         pending=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-p = d.get('assignments', {}).get('${wwn}', {}).get('pending_luns', {})
+p = d.get('groups', {}).get('${wwn}', {}).get('pending_luns', {})
 for ext, n in sorted(p.items(), key=lambda x: x[1]):
-    cur = d.get('assignments', {}).get('${wwn}', {}).get('luns', {}).get(ext, '?')
+    cur = d.get('groups', {}).get('${wwn}', {}).get('luns', {}).get(ext, '?')
     print(f'{ext} {cur} {n}')
 ")
         if [[ -z "$pending" ]]; then
@@ -4990,7 +5065,7 @@ for ext, n in sorted(p.items(), key=lambda x: x[1]):
             local cur_lun; cur_lun=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-print(d.get('assignments',{}).get('${wwn}',{}).get('luns',{}).get('${ext}','?'))
+print(d.get('groups',{}).get('${wwn}',{}).get('luns',{}).get('${ext}','?'))
 ")
             local tag=""
             [[ "$cur_lun" != "$n" ]] && tag="  ${YLW}(pending from LUN ${cur_lun})${NC}"
@@ -5023,7 +5098,7 @@ print(d.get('assignments',{}).get('${wwn}',{}).get('luns',{}).get('${ext}','?'))
             assigned=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-exts = d.get('assignments', {}).get('${wwn}', {}).get('extents', [])
+exts = list(d.get('groups', {}).get('${wwn}', {}).get('luns', {}).keys())
 print('yes' if '${ext}' in exts else 'no')
 ")
             [[ "$assigned" == "yes" ]] || {
@@ -5037,7 +5112,7 @@ print('yes' if '${ext}' in exts else 'no')
             cur_lun=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-print(d.get('assignments', {}).get('${wwn}', {}).get('luns', {}).get('${ext}', '?'))
+print(d.get('groups', {}).get('${wwn}', {}).get('luns', {}).get('${ext}', '?'))
 ")
 
             if [[ "$new_lun" == "$cur_lun" ]]; then
@@ -5045,10 +5120,10 @@ print(d.get('assignments', {}).get('${wwn}', {}).get('luns', {}).get('${ext}', '
                 py_json "
 import json
 d = json.load(open('${CONFIG}'))
-p = d.get('assignments', {}).get('${wwn}', {}).get('pending_luns', {})
+p = d.get('groups', {}).get('${wwn}', {}).get('pending_luns', {})
 if '${ext}' in p:
     del p['${ext}']
-    d['assignments']['${wwn}']['pending_luns'] = p
+    d['groups']['${wwn}']['pending_luns'] = p
     json.dump(d, open('${CONFIG}', 'w'), indent=2)
     print('cancelled')
 else:
@@ -5061,9 +5136,9 @@ else:
                 py_json "
 import json
 d = json.load(open('${CONFIG}'))
-if 'pending_luns' not in d['assignments']['${wwn}']:
-    d['assignments']['${wwn}']['pending_luns'] = {}
-d['assignments']['${wwn}']['pending_luns']['${ext}'] = int('${new_lun}')
+if 'pending_luns' not in d['groups']['${wwn}']:
+    d['groups']['${wwn}']['pending_luns'] = {}
+d['groups']['${wwn}']['pending_luns']['${ext}'] = int('${new_lun}')
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
                 ok "Pending: '${ext}' LUN ${cur_lun} -> LUN ${new_lun} for ${wwn}"
@@ -5083,7 +5158,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 import json
 d = json.load(open('${CONFIG}'))
 total = 0
-for wwn, data in d.get('assignments', {}).items():
+for wwn, data in d.get('groups', {}).items():
     total += len(data.get('pending_luns', {}))
     data['pending_luns'] = {}
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
@@ -5096,10 +5171,10 @@ print(total)
                 count=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-p = d.get('assignments', {}).get('${target}', {}).get('pending_luns', {})
+p = d.get('groups', {}).get('${target}', {}).get('pending_luns', {})
 count = len(p)
-if '${target}' in d.get('assignments', {}):
-    d['assignments']['${target}']['pending_luns'] = {}
+if '${target}' in d.get('groups', {}):
+    d['groups']['${target}']['pending_luns'] = {}
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 print(count)
 ")
@@ -5120,7 +5195,7 @@ print(count)
                 wwns=$(py_json "
 import json
 d = json.load(open('${CONFIG}'))
-for wwn, data in d.get('assignments', {}).items():
+for wwn, data in d.get('groups', {}).items():
     if data.get('pending_luns'):
         print(wwn)
 ")
@@ -5303,17 +5378,17 @@ cmd_group() {
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${name}' in d.get('groups', {}) else 'no')
 except: pass
 ")
             [[ "$exists" == "yes" ]] && { err "Group '${name}' already exists"; return 1; }
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-d.setdefault('assignments', {})['${name}'] = {'initiators': [], 'extents': [], 'luns': {}}
+d.setdefault('groups', {})['${name}'] = {'initiators': [], 'luns': {}, 'pending_luns': {}}
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
-            ok "Group '${name}' created"
+            ok "Group '${name}' created. Use 'group add', 'group map', and 'port attach' to configure it."
             ;;
 
         delete)
@@ -5324,16 +5399,19 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${name}' in d.get('groups', {}) else 'no')
 except: pass
 ")
             [[ "$exists" != "yes" ]] && { err "Group '${name}' not found"; return 1; }
-            warn "Deleting group '${name}' and all its LUN assignments"
+            warn "Deleting group '${name}', its LUN mappings, and all port associations"
             confirm_or_abort "Proceed?"
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-d.get('assignments', {}).pop('${name}', None)
+d.get('groups', {}).pop('${name}', None)
+for pg in d.get('port_groups', {}).values():
+    if '${name}' in pg:
+        pg.remove('${name}')
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
             ok "Group '${name}' deleted. Run 'sync' to update scst.conf."
@@ -5352,14 +5430,14 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${name}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${name}' in d.get('groups', {}) else 'no')
 except: pass
 ")
             [[ "$exists" != "yes" ]] && { err "Group '${name}' not found. Use 'group create' first."; return 1; }
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-grp = d['assignments'].setdefault('${name}', {'initiators': [], 'extents': [], 'luns': {}})
+grp = d['groups'].setdefault('${name}', {'initiators': [], 'luns': {}, 'pending_luns': {}})
 if '${wwn}' not in grp.setdefault('initiators', []):
     grp['initiators'].append('${wwn}')
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
@@ -5374,13 +5452,123 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-grp = d.get('assignments', {}).get('${name}', {})
+grp = d.get('groups', {}).get('${name}', {})
 inits = grp.get('initiators', [])
 if '${wwn}' in inits:
     inits.remove('${wwn}')
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
             ok "Removed ${wwn} from group '${name}'. Run 'sync' to update scst.conf."
+            ;;
+
+        map)
+            # group map <name> <extent> [lun]
+            local name="${1:-}" extent="${2:-}" lun="${3:-auto}"
+            [[ -z "$name" || -z "$extent" ]] && { err "Usage: group map <name> <extent> [lun]"; return 1; }
+            local exists
+            exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${name}' in d.get('groups', {}) else 'no')
+except: pass
+")
+            [[ "$exists" != "yes" ]] && { err "Group '${name}' not found. Use 'group create' first."; return 1; }
+            get_extents_sorted | grep -q "^${extent}$" || { err "Extent '${extent}' not found. Run 'list-extents'"; return 1; }
+
+            # Warn if extent already mapped in another group
+            local existing_grps
+            existing_grps=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    others = [g for g,data in d.get('groups',{}).items()
+              if '${extent}' in data.get('luns',{}) and g != '${name}']
+    if others: print(' '.join(others))
+except: pass
+")
+            if [[ -n "$existing_grps" ]]; then
+                warn "Extent '${extent}' is already mapped in: ${existing_grps}"
+                confirm_or_abort "Map to '${name}' as well?"
+            fi
+
+            info "Mapping ${extent} to group '${name}'"
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+grp = d['groups'].setdefault('${name}', {'initiators': [], 'luns': {}, 'pending_luns': {}})
+luns = grp.setdefault('luns', {})
+if '${extent}' not in luns:
+    if '${lun}' == 'auto':
+        next_lun = max(luns.values(), default=-1) + 1
+    else:
+        next_lun = int('${lun}')
+    luns['${extent}'] = next_lun
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            # Apply live to sysfs on all ports this group is attached to
+            local port_list
+            port_list=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for port, grps in d.get('port_groups', {}).items():
+    if '${name}' in grps:
+        print(port)
+")
+            while IFS= read -r wwn; do
+                [[ -z "$wwn" ]] && continue
+                local tgt_path; tgt_path=$(scst_target_path "$wwn")
+                [[ -d "$tgt_path" ]] || continue
+                local grp_path="${tgt_path}/ini_groups/${name}"
+                [[ -d "$grp_path" ]] || continue
+                local lun_id
+                lun_id=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+print(d.get('groups',{}).get('${name}',{}).get('luns',{}).get('${extent}',''))
+")
+                [[ -n "$lun_id" && ! -d "${grp_path}/luns/${lun_id}" ]] && \
+                    sysfs_write "${grp_path}/luns/mgmt" "add ${extent} ${lun_id}" || true
+            done <<< "$port_list"
+            ok "Mapped ${extent} to group '${name}'"
+            ;;
+
+        unmap)
+            # group unmap <name> <extent>
+            local name="${1:-}" extent="${2:-}"
+            [[ -z "$name" || -z "$extent" ]] && { err "Usage: group unmap <name> <extent>"; return 1; }
+            warn "Removing ${extent} from group '${name}'"
+            py_json "
+import json
+d = json.load(open('${CONFIG}'))
+grp = d.get('groups', {}).get('${name}', {})
+grp.get('luns', {}).pop('${extent}', None)
+grp.get('pending_luns', {}).pop('${extent}', None)
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            # Remove from sysfs on all ports this group is attached to
+            local port_list
+            port_list=$(py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for port, grps in d.get('port_groups', {}).items():
+    if '${name}' in grps:
+        print(port)
+")
+            while IFS= read -r wwn; do
+                [[ -z "$wwn" ]] && continue
+                local grp_path; grp_path="$(scst_target_path "$wwn")/ini_groups/${name}"
+                [[ -d "$grp_path" ]] || continue
+                for lun_path in "${grp_path}/luns"/*/; do
+                    [[ -d "$lun_path" ]] || continue
+                    local dev; dev=$(sysfs_read "${lun_path}/device/name" 2>/dev/null || echo "")
+                    if [[ "$dev" == "$extent" ]]; then
+                        local lun; lun=$(basename "$lun_path")
+                        sysfs_write "${grp_path}/luns/mgmt" "del ${lun}" || true
+                    fi
+                done
+            done <<< "$port_list"
+            ok "Unmapped ${extent} from group '${name}'"
             ;;
 
         rename)
@@ -5391,7 +5579,7 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${old_name}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${old_name}' in d.get('groups', {}) else 'no')
 except: pass
 ")
             [[ "$exists" != "yes" ]] && { err "Group '${old_name}' not found"; return 1; }
@@ -5399,15 +5587,18 @@ except: pass
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    print('yes' if '${new_name}' in d.get('assignments', {}) else 'no')
+    print('yes' if '${new_name}' in d.get('groups', {}) else 'no')
 except: pass
 ")
             [[ "$new_exists" == "yes" ]] && { err "Group '${new_name}' already exists"; return 1; }
             py_json "
 import json
 d = json.load(open('${CONFIG}'))
-assignments = d.get('assignments', {})
-assignments['${new_name}'] = assignments.pop('${old_name}')
+groups = d.get('groups', {})
+groups['${new_name}'] = groups.pop('${old_name}')
+for pg in d.get('port_groups', {}).values():
+    if '${old_name}' in pg:
+        pg[pg.index('${old_name}')] = '${new_name}'
 json.dump(d, open('${CONFIG}', 'w'), indent=2)
 "
             ok "Group renamed '${old_name}' -> '${new_name}'. Run 'sync' to update scst.conf."
@@ -5421,24 +5612,31 @@ json.dump(d, open('${CONFIG}', 'w'), indent=2)
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    grp = d.get('assignments', {}).get(sys.argv[2])
+    grp = d.get('groups', {}).get(sys.argv[2])
     if not grp:
         print('Group not found')
         sys.exit(0)
     inits = grp.get('initiators', [])
-    extents = grp.get('extents', [])
-    luns = grp.get('luns', {})
+    luns  = grp.get('luns', {})
+    pending = grp.get('pending_luns', {})
+    # Which ports is this group attached to?
+    ports = [p for p, gs in d.get('port_groups', {}).items() if sys.argv[2] in gs]
     print('Initiators:')
     for i in inits:
         print(f'  {i}')
     if not inits:
         print('  (none)')
     print('LUN Mappings:')
-    for idx, ext in enumerate(extents):
-        lun_id = luns.get(ext, idx)
-        print(f'  LUN {lun_id}: {ext}')
-    if not extents:
+    for ext, lun_id in luns.items():
+        tag = f'  [pending -> {pending[ext]}]' if ext in pending else ''
+        print(f'  LUN {lun_id}: {ext}{tag}')
+    if not luns:
         print('  (none)')
+    print('Active on ports:')
+    for p in ports:
+        print(f'  {p}')
+    if not ports:
+        print('  (none - use "port attach <port> ${name}")')
 except Exception as e:
     print(f'error: {e}')
 PYEOF
@@ -5446,17 +5644,20 @@ PYEOF
             ;;
 
         *)
-            err "Usage: group <create|delete|add|remove|rename|show>"
-            err "  group create <name>          Create an empty named group"
-            err "  group delete <name>          Delete group and all its LUN assignments"
-            err "  group add    <name> <wwn>    Add an initiator WWN to a group"
-            err "  group remove <name> <wwn>    Remove an initiator WWN from a group"
-            err "  group rename <old>  <new>    Rename a group"
-            err "  group show   <name>          Show group members and LUN mappings"
+            err "Usage: group <create|delete|add|remove|map|unmap|rename|show>"
+            err "  group create <name>           Create an empty named group"
+            err "  group delete <name>           Delete group, LUN mappings, and port associations"
+            err "  group add    <name> <wwn>     Add an initiator WWN to a group"
+            err "  group remove <name> <wwn>     Remove an initiator WWN from a group"
+            err "  group map    <name> <extent> [lun]  Map an extent into a group"
+            err "  group unmap  <name> <extent>  Remove an extent from a group"
+            err "  group rename <old>  <new>     Rename group; updates port associations"
+            err "  group show   <name>           Show members, LUN mappings, and active ports"
             return 1
             ;;
     esac
 }
+
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
 usage() {
@@ -5467,14 +5668,13 @@ Status       : status
                list-hba  list-ports  list-initiators  list-extents  list-groups  list-all
                shortcuts: st  sw  si  lh  lp  li  le  lg  ll
 
-Port         : port  enable | disable  <wwn> | --port N
+Port         : port  enable [--attach-all] | disable | attach | detach | show  <wwn> | --port N
 
-LUN Mapping  : open     <extent> | --ext N
-               close    <extent> | --ext N
-               assign   <extent> | --ext N  <group> | --group <name>  [lun]
-               unassign <extent> | --ext N  <group> | --group <name>
+LUN Mapping  : open   <extent> | --ext N
+               close  <extent> | --ext N
+               assign / unassign  (retired aliases for group map / group unmap)
 
-Group Mgmt   : group  create | delete | add | remove | rename | show
+Group Mgmt   : group  create | delete | add | remove | map | unmap | rename | show
 
 LUN Staging  : lun  set | clear-pending | status
 
@@ -5496,7 +5696,7 @@ Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
                     grep <pattern> | path | status
 
 Global       : examples  help  version
-               --port N   --group <name>   --ext N
+               --port N   --ext N
                --dry-run  --yes  --verbose  --home <path>
 USAGE_EOF
 )"
@@ -5523,24 +5723,34 @@ ${CYN}Status:${NC}
   list-all                       Runs all list commands in sequence    (ll)
 
 ${CYN}Port Management:${NC}
-  port enable  <wwn>|--port N    Write enabled=1 to SCST sysfs, save to config
-  port disable <wwn>|--port N    Write enabled=0, remove from config
+  port enable  <wwn>|--port N [--attach-all]
+                                 Enable FC target port. Creates empty port_groups
+                                 entry by default. --attach-all attaches all
+                                 currently defined groups immediately.
+  port disable <wwn>|--port N    Disable port and remove its port_groups entry
+  port attach  <wwn>|--port N <group>
+                                 Associate a group with a port. Applies live to
+                                 SCST sysfs if the target is running.
+  port detach  <wwn>|--port N <group>
+                                 Remove a group from a port. Removes ini_group
+                                 from live sysfs if target is running.
+  port show    <wwn>|--port N    Show port state and its active groups
 
 ${CYN}LUN Mapping:${NC}
-  open  <extent>|--ext N         Map extent to default group (all initiators), LUN auto
-  close <extent>|--ext N         Remove from default group
-  assign   <extent>|--ext N  <group>|--group <name>  [lun]
-                                 Map extent to a named group at an optional LUN number
-  unassign <extent>|--ext N  <group>|--group <name>
-                                 Remove an extent from a named group
+  open  <extent>|--ext N         Map extent to all initiators (SCST default luns),
+                                 LUN number assigned automatically
+  close <extent>|--ext N         Remove from open access
+  assign / unassign              Retired aliases for group map / group unmap
 
 ${CYN}Group Management:${NC}
   group create <name>            Create an empty named group
-  group delete <name>            Delete a group and all its LUN assignments
+  group delete <name>            Delete group, LUN mappings, and port associations
   group add    <name> <wwn>      Add an initiator WWN to a group
   group remove <name> <wwn>      Remove an initiator WWN from a group
-  group rename <old>  <new>      Rename a group (updates scst.conf on next sync)
-  group show   <name>            Show group members and current LUN mappings
+  group map    <name> <extent> [lun]  Map an extent into a group at a LUN number
+  group unmap  <name> <extent>   Remove an extent from a group
+  group rename <old>  <new>      Rename group; updates all port associations
+  group show   <name>            Show members, LUN mappings, and active ports
 
 ${CYN}LUN Staging:${NC}
   lun set <extent> <group> <lun> Stage a deferred LUN number change. Writes to pending_luns
@@ -5656,7 +5866,6 @@ ${CYN}Global Options:${NC}
 
 ${CYN}Index Selection:${NC}
   --port N     FC port by index from list-ports
-  --group <name>   Group name (or WWN for single-initiator groups) for assign/unassign
   --ext N      Extent by index from list-extents
 HELP_EOF
 )"
@@ -5691,19 +5900,25 @@ EX
   # Expose an extent to all initiators (open access)
   qle_adm.sh open --ext 0
 
-  # Create a named group and add initiators
+  # Create a named group, add initiators, map extents
   qle_adm.sh group create esxi_side_a
   qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:1f
   qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:7f
+  qle_adm.sh group map esxi_side_a cmesxi_vms_lun1 1
+  qle_adm.sh group map esxi_side_a cmesxi_vms_lun10 10
 
-  # Assign an extent to the group
-  qle_adm.sh assign --ext 0 --group esxi_side_a
+  # Attach the group to specific ports
+  qle_adm.sh port attach --port 0 esxi_side_a
+  qle_adm.sh port attach --port 1 esxi_side_a
 
-  # Assign with explicit LUN number
-  qle_adm.sh assign --ext 1 --group esxi_side_a 2
+  # Or enable a port and attach all groups at once
+  qle_adm.sh port enable --port 0 --attach-all
 
-  # Remove a mapping
-  qle_adm.sh unassign --ext 0 --group esxi_side_a
+  # Remove a LUN mapping
+  qle_adm.sh group unmap esxi_side_a cmesxi_vms_lun10
+
+  # Detach a group from a port
+  qle_adm.sh port detach --port 1 esxi_side_a
 
 EX
 
@@ -5850,7 +6065,7 @@ EX
 
   qle_adm.sh --dry-run sync
   qle_adm.sh --dry-run fw save-os
-  qle_adm.sh --dry-run assign --ext 0 --group esxi_side_a
+  qle_adm.sh --dry-run group map esxi_side_a cmesxi_vms_lun1 1
 
 EX
     _divider_force
@@ -5860,7 +6075,7 @@ EX
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
     local args=()
-    local opt_port="" opt_group="" opt_ext=""
+    local opt_port="" opt_ext=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -5872,7 +6087,6 @@ main() {
                         LOG="${QLE_ADM_HOME}/qle_adm.log"
                         shift 2 ;;
             --port)     opt_port="$2"; shift 2 ;;
-            --group)    opt_group="$2"; shift 2 ;;
             --ext)      opt_ext="$2"; shift 2 ;;
             --watch)    args+=("--watch"); shift ;;
             --wide)     args+=("--wide"); shift ;;
@@ -5940,10 +6154,134 @@ main() {
         list-all|ll)     cmd_list_all ;;
         port)
             local sub="${rest[0]:-}"
-            local pos="${rest[1]:-}"
-            [[ "$sub" == "enable" ]]  && cmd_port_enable  "$pos" "$opt_port"
-            [[ "$sub" == "disable" ]] && cmd_port_disable "$pos" "$opt_port"
-            ;;
+            case "$sub" in
+                enable)
+                    cmd_port_enable "${rest[1]:-}" "${rest[2]:-}" "$opt_port"
+                    ;;
+                disable)
+                    cmd_port_disable "${rest[1]:-}" "$opt_port"
+                    ;;
+                attach)
+            # port attach <wwn>|--port N <group>
+                    local port_arg="${rest[1]:-}" grp_name="${rest[2]:-}"
+                    local port_wwn; port_wwn=$(resolve_port "$port_arg" "$opt_port")
+                    [[ -z "$port_wwn" || -z "$grp_name" ]] && {
+                err "Usage: port attach <wwn>|--port N <group>"
+                return 1
+                    }
+                    port_wwn=$(echo "$port_wwn" | tr '[:upper:]' '[:lower:]')
+                    local grp_exists
+                    grp_exists=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    print('yes' if '${grp_name}' in d.get('groups', {}) else 'no')
+except: pass
+")
+                    [[ "$grp_exists" != "yes" ]] && { err "Group '${grp_name}' not found"; return 1; }
+                    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+pg = d.setdefault('port_groups', {})
+port_list = pg.setdefault('${port_wwn}', [])
+if '${grp_name}' not in port_list:
+    port_list.append('${grp_name}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            # Apply live: create ini_group on this port if SCST is running
+                    local tgt_path; tgt_path=$(scst_target_path "$port_wwn")
+                    if [[ -d "$tgt_path" ]]; then
+                local grp_path="${tgt_path}/ini_groups/${grp_name}"
+                if [[ ! -d "$grp_path" ]]; then
+                    sysfs_write "${tgt_path}/ini_groups/mgmt" "create ${grp_name}" || true
+                    # Add initiators
+                    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for i in d.get('groups',{}).get('${grp_name}',{}).get('initiators',[]):
+    print(i)
+" | while IFS= read -r init_wwn; do
+                        [[ -n "$init_wwn" ]] && \
+                            sysfs_write "${grp_path}/initiators/mgmt" "add ${init_wwn}" || true
+                    done
+                    # Add LUN mappings
+                    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+for ext, lun_id in d.get('groups',{}).get('${grp_name}',{}).get('luns',{}).items():
+    print(f'{lun_id} {ext}')
+" | while read -r lun_id ext_name; do
+                        [[ ! -d "${grp_path}/luns/${lun_id}" ]] && \
+                            sysfs_write "${grp_path}/luns/mgmt" "add ${ext_name} ${lun_id}" || true
+                    done
+                fi
+                    fi
+                    ok "Group '${grp_name}' attached to port ${port_wwn}. Run 'sync' to persist."
+                    ;;
+
+                detach)
+            # port detach <wwn>|--port N <group>
+                    local port_arg="${rest[1]:-}" grp_name="${rest[2]:-}"
+                    local port_wwn; port_wwn=$(resolve_port "$port_arg" "$opt_port")
+                    [[ -z "$port_wwn" || -z "$grp_name" ]] && {
+                err "Usage: port detach <wwn>|--port N <group>"
+                return 1
+                    }
+                    port_wwn=$(echo "$port_wwn" | tr '[:upper:]' '[:lower:]')
+                    warn "Detaching group '${grp_name}' from port ${port_wwn}"
+                    py_json "
+import json
+d = json.load(open('${CONFIG}'))
+pg = d.get('port_groups', {}).get('${port_wwn}', [])
+if '${grp_name}' in pg:
+    pg.remove('${grp_name}')
+json.dump(d, open('${CONFIG}', 'w'), indent=2)
+"
+            # Remove ini_group from live sysfs if present
+                    local tgt_path; tgt_path=$(scst_target_path "$port_wwn")
+                    if [[ -d "$tgt_path" ]]; then
+                local grp_path="${tgt_path}/ini_groups/${grp_name}"
+                [[ -d "$grp_path" ]] && \
+                    sysfs_write "${tgt_path}/ini_groups/mgmt" "del ${grp_name}" || true
+                    fi
+                    ok "Group '${grp_name}' detached from port ${port_wwn}. Run 'sync' to persist."
+                    ;;
+
+                show)
+            # port show <wwn>|--port N
+                    local port_arg="${rest[1]:-}"
+                    local port_wwn; port_wwn=$(resolve_port "$port_arg" "$opt_port")
+                    [[ -z "$port_wwn" ]] && { err "Usage: port show <wwn>|--port N"; return 1; }
+                    port_wwn=$(echo "$port_wwn" | tr '[:upper:]' '[:lower:]')
+                    hdr "Port: ${port_wwn}"
+                    python3 - "${CONFIG}" "${port_wwn}" << 'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    port = sys.argv[2]
+    enabled = port in d.get('enabled_ports', [])
+    groups = d.get('port_groups', {}).get(port, [])
+    all_groups = d.get('groups', {})
+    print(f'Status:  {"enabled" if enabled else "disabled"}')
+    print(f'Groups ({len(groups)}):')
+    for g in groups:
+                grp = all_groups.get(g, {})
+                n_inits = len(grp.get('initiators', []))
+                n_luns  = len(grp.get('luns', {}))
+                print(f'  {g}  ({n_inits} initiator(s), {n_luns} LUN mapping(s))')
+    if not groups:
+                print('  (none - use "port attach <wwn> <group>")')
+except Exception as e:
+    print(f'error: {e}')
+PYEOF
+                    divider
+                    ;;
+
+                *)
+                    err "Usage: port <enable|disable|attach|detach|show>"
+                    ;;
+                    esac
+                    ;;
         open)    cmd_open    "${rest[0]:-}" "$opt_ext" ;;
         close)   cmd_close   "${rest[0]:-}" "$opt_ext" ;;
         assign)  cmd_assign  "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_group" "${rest[2]:-auto}" ;;
