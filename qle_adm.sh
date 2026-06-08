@@ -3160,7 +3160,7 @@ except: pass
         while IFS= read -r ext; do
             warn "  ${ext}"
         done <<< "$stale_exts"
-        warn "The WUI may have removed the underlying device. Run 'unassign <extent> <wwn>' to clean up."
+        warn "The WUI may have removed the underlying device. Run 'group unmap <group> <extent>' to clean up."
         warn "Use 'list-extents' or 'list-mapping' to identify stale entries."
     fi
 
@@ -4181,14 +4181,13 @@ except: pass
         if [[ -n "$assigned_inits" ]]; then
             _parts=()
             for _w in $assigned_inits; do
-                _lbl=$(wwn_label "$_w" "initiator")
-                _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
+                _parts+=("${WHT}${_w}${NC}")
             done
             local stale_tag=""
             if [[ $stale -eq 1 ]]; then
                 local _cmds=""
                 for _w in $assigned_inits; do
-                    _cmds+=$'\n'"      ${DIM}run: unassign ${ext} ${_w}${NC}"
+                    _cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
                 done
                 stale_tag="$_cmds"
             fi
@@ -4259,9 +4258,8 @@ except: pass
             if [[ -n "$assigned_inits" ]]; then
                 _parts=()
                 for _w in $assigned_inits; do
-                    _lbl=$(wwn_label "$_w" "initiator")
-                    _parts+=("${WHT}${_w}${NC} (${CYN}${_lbl}${NC})")
-                    unassign_cmds+=$'\n'"      ${DIM}run: unassign ${ext} ${_w}${NC}"
+                    _parts+=("${WHT}${_w}${NC}")
+                    unassign_cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
                 done
                 assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
             fi
@@ -5716,13 +5714,12 @@ usage() {
 Status       : status
                stats  [--watch] [--wide]
                list-hba  list-ports  list-initiators  list-extents  list-mapping  list-all
-               shortcuts: st  sw  si  lh  lp  li  le  lm  ll
+               shortcuts: st  sw  si  lh  lp  li  le  lm  la
 
 Port         : port  enable [--attach-all] | disable | attach | detach | show  <wwn> | --port N
 
 LUN Mapping  : open   <extent> | --ext N
                close  <extent> | --ext N
-               assign / unassign  (retired aliases for group map / group unmap)
 
 Group Mgmt   : group  create | delete | add | remove | map | unmap | rename | show
 
@@ -5774,7 +5771,7 @@ ${CYN}Status:${NC}
                                  mappings shown as unconfigured. Port-centric summary
                                  at the end shows the group matrix per enabled port.
                                  (lm)
-  list-all                       Runs all list commands in sequence    (ll)
+  list-all                       Runs all list commands in sequence    (la)
 
 ${CYN}Port Management:${NC}
   port enable  <wwn>|--port N [--attach-all]
@@ -5794,7 +5791,6 @@ ${CYN}LUN Mapping:${NC}
   open  <extent>|--ext N         Map extent to all initiators (SCST default luns),
                                  LUN number assigned automatically
   close <extent>|--ext N         Remove from open access
-  assign / unassign              Retired aliases for group map / group unmap
 
 ${CYN}Group Management:${NC}
   group create <name>            Create an empty named group
@@ -6210,7 +6206,7 @@ main() {
         list-initiators|li) cmd_list_initiators "${rest[@]}" ;;
         list-mapping|lm) cmd_list_mapping ;;
         group)           cmd_group "${rest[@]}" ;;
-        list-all|ll)     cmd_list_all ;;
+        list-all|la)     cmd_list_all ;;
         port)
             local sub="${rest[0]:-}"
             case "$sub" in
@@ -6343,8 +6339,6 @@ PYEOF
                     ;;
         open)    cmd_open    "${rest[0]:-}" "$opt_ext" ;;
         close)   cmd_close   "${rest[0]:-}" "$opt_ext" ;;
-        assign)  cmd_assign  "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_group" "${rest[2]:-auto}" ;;
-        unassign) cmd_unassign "${rest[0]:-}" "$opt_ext" "${rest[1]:-}" "$opt_group" ;;
         fw)         cmd_fw         "${rest[@]}" ;;
         isp-params) cmd_isp_params "${rest[@]}" ;;
         name)       cmd_name       "${rest[@]}" ;;

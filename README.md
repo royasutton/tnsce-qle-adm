@@ -67,8 +67,8 @@ TrueNAS lifecycle events. Two representations are derived from it:
 at startup to initialize all FC target state: enabled ports, rel_tgt_ids,
 LUN mappings, and initiator groups.
 
-**Live sysfs** - all runtime changes (port enable/disable, open, close,
-assign, unassign) write directly to both sysfs and `config.json` atomically.
+**Live sysfs** - all runtime changes (`port enable/disable`, `open`, `close`,
+`group map`, `group unmap`) write directly to both sysfs and `config.json` atomically.
 Active sessions are never disrupted by configuration changes to other targets.
 
 The TrueNAS WUI rewrites `/etc/scst.conf` on every iSCSI save. Running
@@ -161,7 +161,7 @@ chmod +x ./qle_adm.sh
 ./qle_adm.sh port enable --port 0
 
 # Verify the mapping and confirm the initiator session is active
-./qle_adm.sh list-assignments
+./qle_adm.sh list-mapping
 ./qle_adm.sh list-initiators
 ```
 
@@ -209,8 +209,10 @@ qle_adm.sh port enable --port 1
 # 8a. Expose a ZFS volume to all initiators
 qle_adm.sh open --ext 0
 
-# 8b. Or assign to a specific initiator only
-qle_adm.sh assign --ext 0 --init 0
+# 8b. Or map to a specific initiator group only
+qle_adm.sh group create mygroup
+qle_adm.sh group add mygroup <initiator-wwn>
+qle_adm.sh group map mygroup --ext 0
 
 # 9. Verify
 qle_adm.sh status

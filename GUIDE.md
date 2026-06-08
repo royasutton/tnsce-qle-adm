@@ -51,7 +51,7 @@ ports, rel_tgt_ids, LUN mappings, and initiator groups. No sysfs writes are
 performed at boot; SCST initializes everything from its own config file.
 
 **Live sysfs** handles all runtime changes. Every change command
-(`port enable/disable`, `open`, `close`, `assign`, `unassign`) writes to
+(`port enable/disable`, `open`, `close`, `group map`, `group unmap`) writes to
 both sysfs and config.json atomically. There is no separate save step.
 
 ### Why scst.conf for boot, sysfs for runtime
@@ -268,9 +268,9 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
-| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[per-init]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). `[no sysfs]` = not applied, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
+| `list-extents` | `le` | SCST extents with size, config state (`[open]`/`[in group]`/`[unmapped]`), and live sysfs state (`[no sysfs]`/`[mapped]`/`[connected]`/`[active]`). Config state and sysfs state are independent columns: config state reflects what `config.json` says; sysfs state reflects the running SCST kernel. `[unmapped]` with `[mapped]` means the LUN exists in sysfs but is not tracked in config.json — run `sync` to reconcile. `[no sysfs]` = config exists but not yet applied to running SCST, run `sync --apply`. `[mapped]` = in sysfs, no initiator session. `[connected]` = session present, no I/O yet. `[active]` = session present with I/O, shows active commands and session R/W totals. |
 | `list-mapping` | `lm` | Full LUN mapping topology: groups, initiators, LUN mappings, port associations, and a port-centric summary. `list-groups` / `lg` retained as aliases. |
-| `list-all` | `ll` | All list commands in sequence |
+| `list-all` | `la` | All list commands in sequence |
 
 ### Port management
 
@@ -289,10 +289,9 @@ Writes to both sysfs (immediate) and config.json (persistent).
 ./qle_adm.sh open  --ext 0
 ./qle_adm.sh close --ext 0
 
-# Per-initiator: specific initiator only
-./qle_adm.sh assign   --ext 0 --group esxi_side_a
-./qle_adm.sh assign   --ext 0 <initiator-wwn>
-./qle_adm.sh unassign --ext 0 --group esxi_side_a
+# Per-group: specific initiator group only
+./qle_adm.sh group map   esxi_side_a --ext 0
+./qle_adm.sh group unmap esxi_side_a --ext 0
 ```
 
 All mapping commands write to both sysfs (immediate) and config.json
@@ -361,7 +360,7 @@ qle_adm.sh sync --restart
 ```
 reset seen       : wipe seen_initiators history
 reset ports      : disable all ports and clear enabled_ports
-reset mappings   : remove all open/assigned LUNs from sysfs and config
+reset mappings   : remove all open/group-mapped LUNs from sysfs and config
 reset names      : wipe all WWN names
 reset all        : all of the above (prompts unless --yes)
 ```
@@ -506,7 +505,7 @@ qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:1f
 qle_adm.sh group add esxi_side_a 20:00:00:25:b5:c0:a0:7f
 
 # Assign extents to the group
-qle_adm.sh assign <extent> esxi_side_a
+qle_adm.sh group map esxi_side_a <extent>
 
 # Delete the old single-initiator groups
 qle_adm.sh group delete 20:00:00:25:b5:c0:a0:1f
@@ -565,7 +564,7 @@ qle_adm.sh deploy install
 qle_adm.sh port enable <wwn>
 qle_adm.sh group create <name>
 qle_adm.sh group add <name> <wwn>
-qle_adm.sh assign <extent> <group>
+qle_adm.sh group map <name> <extent>
 qle_adm.sh sync
 ```
 
@@ -574,7 +573,7 @@ qle_adm.sh sync
 ```bash
 qle_adm.sh hba swap           # auto-migrate port config to new card (same ISP, new count >= old)
 qle_adm.sh hba swap --force   # cross-ISP or port count reduction: clears enabled_ports,
-                   # preserves assignments/extents/initiator names
+                   # preserves groups/extents/initiator names
 ```
 
 `hba swap` compares `hba_identity` (registered by `deploy reconfigure`) against
@@ -1029,8 +1028,8 @@ three files for all subsequent boots.
 
 **Q: Do I need to run sync after every configuration change?**
 
-No. All change commands (`port enable/disable`, `open`, `close`, `assign`,
-`unassign`) write atomically to both config.json and live sysfs. `sync` is
+No. All change commands (`port enable/disable`, `open`, `close`, `group map`,
+`group unmap`) write atomically to both config.json and live sysfs. `sync` is
 only needed in specific situations:
 
 - After a WUI iSCSI save wiped the scst.conf FC block: `sync`
