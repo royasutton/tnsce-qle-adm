@@ -1,6 +1,6 @@
 # Complete Guide
 
-`qle_adm.sh`: QLogic FC Target Manager for TrueNAS SCALE CE
+`qle_adm.sh` v7.1: QLogic FC Target Manager for TrueNAS SCALE CE
 
 ---
 
@@ -444,7 +444,6 @@ authoritative source for param drift detection.
 | `deploy uninstall` | Remove all installed components and kernel cmdline tokens, preserve config.json |
 | `deploy reconfigure [--mode M]` | Switch boot mode; tears down old artefacts, installs new. Writes `hba_identity` on completion. |
 | `deploy status` | Show active mode, artefact state, last boot mode, and gap analysis |
-| `deploy migrate [--apply]` | Migrate config.json to current schema. Defaults to dry-run; use `--apply` to write. Backs up config first. |
 | `deploy migrate [--apply]` | Migrate config.json to the current schema. Defaults to dry-run preview; use `--apply` to write. Backs up config before writing (`config.json.bak`, `.bak.1`, `.bak.2` ...). |
 
 ### Config Schema Migration

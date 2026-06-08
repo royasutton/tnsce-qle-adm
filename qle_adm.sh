@@ -12,10 +12,10 @@
 #   QLE_ADM_USE_UNICODE 0 = ASCII fallback for symbols (default 1)
 #
 # Requires: bash, python3 (JSON only)
-# Version: 7.0
+# Version: 7.1
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-VERSION="7.0"
+VERSION="7.1"
 CONFIG_SCHEMA=3   # current schema version written by cfg_init
 
 # Migration eligibility table.
