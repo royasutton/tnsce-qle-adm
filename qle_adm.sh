@@ -3983,9 +3983,11 @@ cmd_list_hba() {
         fw_ver=$(echo "$fw_raw" | awk '{print $1}')
         fw_build=$(echo "$fw_raw" | grep -oP '(?<=\()\d+(?=\))' || echo "")
 
-        local state_str ptype_short
-        [[ "$state" == "Online" ]] && state_str="${GRN}${state}${NC}" || state_str="${RED}${state}${NC}"
+        local ptype_short
         ptype_short=$(echo "$ptype" | sed 's/Point-To-Point (direct nport connection)/Point-To-Point/')
+
+        local state_val
+        [[ "$state" == "Online" ]] && state_val="${GRN}${state}${NC}" || state_val="${RED}${state}${NC}"
 
         local speed max_speed
         speed=$(sysfs_read "${fc_host}/speed" 2>/dev/null | grep -oP '[0-9]+' | head -1 || echo "?")
@@ -4004,7 +4006,7 @@ cmd_list_hba() {
         pci_lnksta_speed=$(echo "$lspci_out" | grep -oP 'LnkSta:.*Speed \K[^,]+' || echo "?")
         pci_lnksta_width=$(echo "$lspci_out" | grep -oP 'LnkSta:.*Width \K\S+' || echo "?")
         pci_downgraded=""
-        echo "$lspci_out" | grep -q "downgraded" && pci_downgraded=" ${YLW}(downgraded)${NC}"
+        echo "$lspci_out" | grep -q "downgraded" && pci_downgraded=" [${YLW}downgraded${NC}]"
 
         local fw_file stored stored_ver
         fw_file="${ISP_FW_FILE[$isp]:-}"
@@ -4013,20 +4015,25 @@ cmd_list_hba() {
             stored_ver=$(strings "$stored" | grep -i 'Version' | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown") || \
             stored_ver=""
 
-        echo -e "\n${WHT}[${idx}] ${host}${NC} - ${isp} @ ${pci}"
-        echo -e "  WWN        : ${CYN}${wwn}${NC}"
-        echo -e "  Running FW : ${fw_ver}${fw_build:+ (build ${fw_build})}"
-        echo -e "  Primary FW : ${primary_fw:-${DIM}not exposed by driver${NC}}"
-        echo -e "  Optrom FW  : ${optrom_fw:-n/a}"
-        echo -e "  Stored FW  : ${stored_ver:-${DIM}none${NC}}"
-        echo -e "  Port State : $(echo -e "${state_str}")"
-        echo -e "  Port Type  : ${ptype_short}"
-        echo -e "  Link Speed : ${speed} Gbps"
-        echo -e "  Max Speed  : ${max_speed} Gbps"
-        echo -e "  Model      : ${model}"
-        echo -e "  Serial     : ${serial}"
-        echo -e "  PCIe Cap   : ${pci_lnkcap_speed} ${pci_lnkcap_width}"
-        echo -e "  PCIe Link  : ${pci_lnksta_speed} ${pci_lnksta_width}${pci_downgraded}"
+        local primary_fw_val optrom_fw_val stored_ver_val
+        primary_fw_val="${primary_fw:-${DIM}not exposed by driver${NC}}"
+        optrom_fw_val="${optrom_fw:-${DIM}n/a${NC}}"
+        stored_ver_val="${stored_ver:-${DIM}none${NC}}"
+
+        echo -e "\n${DIM}[${idx}]${NC} ${host} - ${isp} @ ${DIM}${pci}${NC}"
+        echo -e "  ${CYN}WWN        :${NC} ${DIM}${wwn}${NC}"
+        echo -e "  ${CYN}Running FW :${NC} ${fw_ver}${fw_build:+ (build ${fw_build})}"
+        echo -e "  ${CYN}Primary FW :${NC} ${primary_fw_val}"
+        echo -e "  ${CYN}Optrom FW  :${NC} ${optrom_fw_val}"
+        echo -e "  ${CYN}Stored FW  :${NC} ${stored_ver_val}"
+        echo -e "  ${CYN}Port State :${NC} [${state_val}]"
+        echo -e "  ${CYN}Port Type  :${NC} ${ptype_short}"
+        echo -e "  ${CYN}Link Speed :${NC} ${speed} Gbps"
+        echo -e "  ${CYN}Max Speed  :${NC} ${max_speed} Gbps"
+        echo -e "  ${CYN}Model      :${NC} ${model}"
+        echo -e "  ${CYN}Serial     :${NC} ${serial}"
+        echo -e "  ${CYN}PCIe Cap   :${NC} ${pci_lnkcap_speed} ${pci_lnkcap_width}"
+        echo -e "  ${CYN}PCIe Link  :${NC} ${pci_lnksta_speed} ${pci_lnksta_width}${pci_downgraded}"
     done
     divider
 }
@@ -4049,12 +4056,12 @@ cmd_list_ports() {
     cfg_check_schema
     local enabled_ports; enabled_ports=$(cfg_get_list "enabled_ports")
     detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
-        local managed state_col ptype_short
-        echo "$enabled_ports" | grep -q "$wwn" && managed="${GRN}managed${NC}" || managed="${YLW}unmanaged${NC}"
-        [[ "$state" == "Online" ]] && state_col="$GRN" || state_col="$RED"
+        local managed_val state_val ptype_short
+        echo "$enabled_ports" | grep -q "$wwn" && managed_val="${GRN}managed${NC}" || managed_val="${YLW}unmanaged${NC}"
+        [[ "$state" == "Online" ]] && state_val="${GRN}${state}${NC}" || state_val="${RED}${state}${NC}"
         ptype_short=$(echo "$ptype" | sed 's/Point-To-Point (direct nport connection)/P2P/')
         local label; label=$(wwn_label "$wwn" "target")
-        echo -e "  [${idx}] ${WHT}${wwn}${NC} (${CYN}${label}${NC})  ${isp}  ${host}  ${state_col}${state}${NC}  ${ptype_short}  [${managed}]"
+        echo -e "  ${DIM}[${idx}]${NC} ${DIM}${wwn}${NC} (${CYN}${label}${NC})  ${isp}  ${host}  [${state_val}]  ${ptype_short}  [${managed_val}]"
     done
     divider
 }
@@ -4086,18 +4093,20 @@ cmd_list_extents() {
         if [[ -d "$dev_path" ]]; then
             local size_mb_raw; size_mb_raw=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "")
             if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
-                size=$(python3 -c "
+                local size_val
+                size_val=$(python3 -c "
 mb = int('${size_mb_raw}')
 gib = mb / 1024.0
 mib = mb
 kib = mb * 1024
 if gib >= 1.0:
-    print(f'{gib:6.2f} GiB')
+    print(f'{gib:.2f} GiB')
 elif mib >= 1:
-    print(f'{mib:6.2f} MiB')
+    print(f'{mib:.2f} MiB')
 else:
-    print(f'{kib:6.2f} KiB')
+    print(f'{kib:.2f} KiB')
 " 2>/dev/null || echo "${size_mb_raw} MB")
+                size="${CYN}size:${NC}${size_val}"
             fi
             # Read the SCSI Unit Serial Number (USN) directly from SCST sysfs.
             # This is the serial the initiator sees via INQUIRY page 0x80,
@@ -4105,7 +4114,7 @@ else:
             # probing udevadm which has no serial data for zvols.
             local usn; usn=$(sysfs_read "${dev_path}/usn" 2>/dev/null || echo "")
             usn="${usn%\[key\]}"
-            [[ -n "$usn" ]] && serial="${CYN}s/n:${NC} ${DIM}${usn}${NC}"
+            [[ -n "$usn" ]] && serial="${CYN}s/n:${NC}${usn}"
         fi
 
         # config:[...] — unified config state. Brackets contain OPEN and/or group
@@ -4124,7 +4133,7 @@ except:
     print('UNMAPPED')
 ")
         if [[ "$status" == "UNMAPPED" ]]; then
-            status="${DIM}config:[UNMAPPED]${NC}"
+            status="${CYN}config:${NC}${DIM}[UNMAPPED]${NC}"
             stale_tag=""
         else
             # Build stale remediation hints (one line per group) before wrapping
@@ -4141,11 +4150,11 @@ except: pass
                 done
             fi
             if [[ "$status" == OPEN* ]] && [[ "$status" != *,* ]]; then
-                status="${GRN}config:[OPEN]${NC}"
+                status="${CYN}config:${NC}${GRN}[OPEN]${NC}"
             elif [[ "$status" == OPEN* ]]; then
-                status="${GRN}config:[${status}]${NC}"
+                status="${CYN}config:${NC}${GRN}[${status}]${NC}"
             else
-                status="${DIM}config:[${status}]${NC}"
+                status="${CYN}config:${NC}[${status}]"
             fi
         fi
 
@@ -4180,7 +4189,7 @@ except: pass
             fi
 
             if [[ $lun_found -eq 0 ]]; then
-                live_status="${YLW}sysfs:[no sysfs]${NC}"
+                live_status="${CYN}sysfs:${NC}${YLW}[no sysfs]${NC}"
             else
                 # Session may be on any target port - search all targets
                 # for a session matching the initiator group name.
@@ -4194,7 +4203,7 @@ except: pass
                     fi
                 done
                 if [[ -z "$sess_path" ]]; then
-                    live_status="${CYN}sysfs:[mapped]${NC}"
+                    live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
                 else
                     local rc wc rk wk ac
                     rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
@@ -4204,15 +4213,15 @@ except: pass
                     ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
                     local total_io=$(( rc + wc ))
                     if [[ $total_io -eq 0 ]]; then
-                        live_status="${GRN}sysfs:[connected]${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[connected]${NC}"
                     else
-                        live_status="${GRN}sysfs:[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
                     fi
                 fi
             fi
         fi
 
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}${serial:+  ${serial}}  ${status}  ${live_status}${stale_tag}"
+        echo -e "  ${DIM}[${idx}]${NC} ${ext}  ${size}  ${serial:+${serial}  }${status}  ${live_status}${stale_tag}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
 
@@ -4251,13 +4260,13 @@ except:
     print('UNMAPPED')
 ")
             if [[ "$grp_list" == "UNMAPPED" ]]; then
-                cfg_label="${DIM}config:[UNMAPPED]${NC}"
+                cfg_label="${CYN}config:${NC}${DIM}[UNMAPPED]${NC}"
             elif [[ "$grp_list" == OPEN* ]] && [[ "$grp_list" != *,* ]]; then
-                cfg_label="${GRN}config:[OPEN]${NC}"
+                cfg_label="${CYN}config:${NC}${GRN}[OPEN]${NC}"
             elif [[ "$grp_list" == OPEN* ]]; then
-                cfg_label="${GRN}config:[${grp_list}]${NC}"
+                cfg_label="${CYN}config:${NC}${GRN}[${grp_list}]${NC}"
             else
-                cfg_label="${DIM}config:[${grp_list}]${NC}"
+                cfg_label="${CYN}config:${NC}[${grp_list}]"
             fi
             for _w in $(py_json "
 import json
@@ -4269,7 +4278,7 @@ except: pass
 "); do
                 unmap_cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
             done
-            echo -e "  [*] ${YLW}${ext}${NC}  ${cfg_label}  ${YLW}[stale - not in scst.conf]${NC}${unmap_cmds}"
+            echo -e "  ${DIM}[*]${NC} ${ext}  ${cfg_label}  ${YLW}[stale - not in scst.conf]${NC}${unmap_cmds}"
             idx=$((idx + 1))
         done <<< "$stale_extents"
     fi
@@ -4297,8 +4306,8 @@ cmd_list_initiators() {
         local init_label tgt_label
         init_label=$(wwn_label "$init_wwn" "initiator")
         tgt_label=$(wwn_label "$tgt_wwn" "target")
-        echo -e "  [${i}] ${GRN}${SYM_BULLET}${NC} ${init_wwn} (${CYN}${init_label}${NC}) ${SYM_INFO} ${tgt_wwn} (${CYN}${tgt_label}${NC})"
-        echo -e "       Cmds: ${cmds}  R: ${rc} (${rk} KB)  W: ${wc} (${wk} KB)"
+        echo -e "  ${DIM}[${i}]${NC} ${GRN}${SYM_BULLET}${NC} ${DIM}${init_wwn}${NC} (${CYN}${init_label}${NC}) ${SYM_INFO} ${DIM}${tgt_wwn}${NC} (${CYN}${tgt_label}${NC})"
+        echo -e "       ${CYN}cmds:${NC}${cmds}  ${CYN}R:${NC}${rc} (${rk} KB)  ${CYN}W:${NC}${wc} (${wk} KB)"
         cfg_record_seen_initiator "$init_wwn"
         i=$((i + 1))
         found=$((found + 1))
@@ -4321,7 +4330,7 @@ except: pass
     else
         while IFS=' ' read -r wwn ts; do
             local lbl; lbl=$(wwn_label "$wwn" "initiator")
-            echo -e "  ${wwn} (${CYN}${lbl}${NC})  last seen: ${ts}"
+            echo -e "  ${DIM}${wwn}${NC} (${CYN}${lbl}${NC})  ${CYN}last seen:${NC} ${ts}"
         done <<< "$seen_list"
     fi
     divider
@@ -4345,7 +4354,7 @@ cmd_list_mapping() {
             if [[ -n "$scst_devices" ]] && ! echo "$scst_devices" | grep -q "^${ext}$"; then
                 stale_tag=$'\n'"      ${DIM}run: close ${ext}${NC}"
             fi
-            echo -e "  LUN ${lun}: ${WHT}${ext}${NC}${stale_tag}"
+            echo -e "  ${CYN}LUN ${lun}:${NC} ${ext}${stale_tag}"
             lun=$((lun + 1))
         done <<< "$open_extents"
     fi
@@ -4378,24 +4387,24 @@ PYEOF
         local stale_warned=0
         while IFS='|' read -r grp inits pairs ports mapped; do
             if [[ "$mapped" == "no" ]]; then
-                echo -e "  ${WHT}${grp}${NC}  ${DIM}(no LUN mappings)${NC}"
+                echo -e "  ${grp}  ${DIM}(no LUN mappings)${NC}"
             else
-                echo -e "  ${WHT}${grp}${NC}"
+                echo -e "  ${grp}"
             fi
             if [[ -n "$inits" ]]; then
                 IFS=',' read -ra init_arr <<< "$inits"
                 for init_wwn in "${init_arr[@]}"; do
                     local ilbl; ilbl=$(wwn_label "$init_wwn" "initiator")
-                    echo -e "    ${DIM}initiator: ${init_wwn} (${ilbl})${NC}"
+                    echo -e "    ${CYN}initiator:${NC} ${DIM}${init_wwn}${NC} (${ilbl})"
                 done
             else
-                echo -e "    ${DIM}initiators: (none)${NC}"
+                echo -e "    ${CYN}initiators:${NC} ${DIM}(none)${NC}"
             fi
             if [[ -n "$ports" ]]; then
                 IFS=',' read -ra port_arr <<< "$ports"
                 for port_wwn in "${port_arr[@]}"; do
                     local plbl; plbl=$(wwn_label "$port_wwn" "target")
-                    echo -e "    ${DIM}port: ${port_wwn} (${plbl})${NC}"
+                    echo -e "    ${CYN}port:${NC} ${DIM}${port_wwn}${NC} (${plbl})"
                 done
             else
                 echo -e "    ${YLW}not attached to any port${NC}"
@@ -4409,7 +4418,7 @@ PYEOF
                         stale_tag=$'\n'"        ${DIM}run: group unmap ${grp} ${ext}${NC}"
                         stale_warned=1
                     fi
-                    echo -e "    LUN ${lun}: ${ext}${stale_tag}"
+                    echo -e "    ${CYN}LUN ${lun}:${NC} ${ext}${stale_tag}"
                 done
             fi
         done <<< "$grp_list"
@@ -4439,9 +4448,9 @@ try:
 except: pass
 ")
             if [[ -n "$port_grps" ]]; then
-                echo -e "  ${WHT}${pwwn}${NC} (${CYN}${plbl}${NC}): ${port_grps}"
+                echo -e "  ${DIM}${pwwn}${NC} (${CYN}${plbl}${NC}): ${port_grps}"
             else
-                echo -e "  ${WHT}${pwwn}${NC} (${CYN}${plbl}${NC}): ${YLW}(no groups attached)${NC}"
+                echo -e "  ${DIM}${pwwn}${NC} (${CYN}${plbl}${NC}): ${YLW}(no groups attached)${NC}"
             fi
         done <<< "$enabled_ports"
     fi
