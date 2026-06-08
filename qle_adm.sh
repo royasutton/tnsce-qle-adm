@@ -4162,10 +4162,10 @@ except: pass
             live_status="${YLW}[stale - not in scst.conf]${NC}"
         else
             # Live sysfs status - four states:
-            #   sysfs:[no sysfs]  - in scst.conf but not applied to running SCST, run 'sync --apply'
-            #   sysfs:[mapped]    - LUN mapping in sysfs ini_group, no initiator session
-            #   sysfs:[connected] - session present on target, LUN visible, no I/O yet
-            #   sysfs:[active]    - session present, I/O has been issued
+            #   sysfs:[no sysfs]  - LUN not in sysfs at all; run 'sync --apply'
+            #   sysfs:[mapped]    - LUN in sysfs ini_group, no initiator session
+            #   sysfs:[connected] - initiator session present, no command in flight
+            #   sysfs:[active]    - active_commands > 0 on this LUN right now
             #
             # Detection: each ini_group lun dir contains a 'device' symlink ->
             # ../../../../../../../devices/<extent-name>. Read it to confirm
@@ -4217,19 +4217,19 @@ except: pass
                 if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
                 else
-                    # Use per-LUN counters only — session-level counters accumulate
-                    # across all LUNs in the session and would make every extent in
-                    # the group appear active whenever any one of them has seen I/O.
+                    # Gate on active_commands for this LUN only.
+                    # [active]    = command(s) in flight on this LUN right now.
+                    # [connected] = session present, no command in flight.
+                    # Session-level lifetime IO counters are not used: they
+                    # accumulate across all LUNs and would make every extent
+                    # in the group appear active after any one LUN is used.
                     local lun_path="${sess_path}lun${matched_lun_n}"
-                    local ac rk wk
-                    ac=$(hex_to_dec "$(sysfs_read "${lun_path}/active_commands"    2>/dev/null || echo 0)")
-                    rk=$(hex_to_dec "$(sysfs_read "${lun_path}/read_io_count_kb"   2>/dev/null || echo 0)")
-                    wk=$(hex_to_dec "$(sysfs_read "${lun_path}/write_io_count_kb"  2>/dev/null || echo 0)")
-                    local lun_io=$(( ac + rk + wk ))
-                    if [[ $lun_io -eq 0 ]]; then
+                    local ac
+                    ac=$(hex_to_dec "$(sysfs_read "${lun_path}/active_commands" 2>/dev/null || echo 0)")
+                    if [[ $ac -eq 0 ]]; then
                         live_status="${CYN}sysfs:${NC}${GRN}[connected]${NC}"
                     else
-                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  R:${rk}KB W:${wk}KB)${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac})${NC}"
                     fi
                 fi
             fi
