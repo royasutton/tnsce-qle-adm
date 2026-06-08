@@ -4100,19 +4100,19 @@ except:
     print('unmapped')
 ")
         case "$has_assignment" in
-            open)     status="${GRN}[open]${NC}" ;;
-            assigned) status="${DIM}[in group]${NC}" ;;
-            *)        status="${DIM}[unmapped]${NC}" ;;
+            open)     status="${GRN}cfg:[open]${NC}" ;;
+            assigned) status="${DIM}cfg:[in group]${NC}" ;;
+            *)        status="${DIM}cfg:[unmapped]${NC}" ;;
         esac
 
         if [[ $stale -eq 1 ]]; then
             live_status="${YLW}[stale - not in scst.conf]${NC}"
         else
             # Live sysfs status - four states:
-            #   [no sysfs]  - in scst.conf but not applied to running SCST, run 'sync --apply'
-            #   [mapped]    - LUN mapping in sysfs ini_group, no initiator session
-            #   [connected] - session present on target, LUN visible, no I/O yet
-            #   [active]    - session present, I/O has been issued
+            #   sysfs:[no sysfs]  - in scst.conf but not applied to running SCST, run 'sync --apply'
+            #   sysfs:[mapped]    - LUN mapping in sysfs ini_group, no initiator session
+            #   sysfs:[connected] - session present on target, LUN visible, no I/O yet
+            #   sysfs:[active]    - session present, I/O has been issued
             #
             # Detection: each ini_group lun dir contains a 'device' symlink ->
             # ../../../../../../../devices/<extent-name>. Read it to confirm
@@ -4136,7 +4136,7 @@ except:
             fi
 
             if [[ $lun_found -eq 0 ]]; then
-                live_status="${YLW}[no sysfs]${NC}"
+                live_status="${YLW}sysfs:[no sysfs]${NC}"
             else
                 # Session may be on any target port - search all targets
                 # for a session matching the initiator group name.
@@ -4150,7 +4150,7 @@ except:
                     fi
                 done
                 if [[ -z "$sess_path" ]]; then
-                    live_status="${CYN}[mapped]${NC}"
+                    live_status="${CYN}sysfs:[mapped]${NC}"
                 else
                     local rc wc rk wk ac
                     rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
@@ -4160,9 +4160,9 @@ except:
                     ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
                     local total_io=$(( rc + wc ))
                     if [[ $total_io -eq 0 ]]; then
-                        live_status="${GRN}[connected]${NC}"
+                        live_status="${GRN}sysfs:[connected]${NC}"
                     else
-                        live_status="${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                        live_status="${GRN}sysfs:[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
                     fi
                 fi
             fi
@@ -5828,7 +5828,7 @@ ${CYN}Operation:${NC}
                                             group structural changes (add/remove
                                             groups, initiator membership, port
                                             attach/detach) — use --restart for
-                                            those. Use when extents show [no sysfs].
+                                            those. Use when extents show sysfs:[no sysfs].
                                  --restart: rebuilds scst.conf then restarts
                                             scst.service. All active sessions
                                             dropped. Use after a BE change.
