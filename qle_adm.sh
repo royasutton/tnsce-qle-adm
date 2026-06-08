@@ -4191,16 +4191,28 @@ except: pass
             if [[ $lun_found -eq 0 ]]; then
                 live_status="${CYN}sysfs:${NC}${YLW}[no sysfs]${NC}"
             else
-                # Session may be on any target port - search all targets
-                # for a session matching the initiator group name.
+                # Session detection: sessions are indexed by initiator WWN, not
+                # group name. Look up the group's initiator WWNs from config.json
+                # then search all target sessions for any matching WWN.
+                local group_inits
+                group_inits=$(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    inits = d.get('groups', {}).get('${matched_init_group}', {}).get('initiators', [])
+    print(' '.join(inits))
+except: pass
+")
                 local sess_path=""
                 for _tgt_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
                     [[ -d "$_tgt_dir" ]] || continue
                     local _sp_name; _sp_name=$(basename "${_tgt_dir%/}")
-                    if [[ "${_sp_name,,}" == "${matched_init_group,,}" ]]; then
-                        sess_path="$_tgt_dir"
-                        break
-                    fi
+                    for _init_wwn in $group_inits; do
+                        if [[ "${_sp_name,,}" == "${_init_wwn,,}" ]]; then
+                            sess_path="$_tgt_dir"
+                            break 2
+                        fi
+                    done
                 done
                 if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
