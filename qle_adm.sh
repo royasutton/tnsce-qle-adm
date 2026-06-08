@@ -4061,12 +4061,45 @@ cmd_list_ports() {
     cfg_check_schema
     local enabled_ports; enabled_ports=$(cfg_get_list "enabled_ports")
     detect_hbas | while read -r idx host pci isp wwn fw state ptype; do
-        local managed_val state_val ptype_short
-        echo "$enabled_ports" | grep -q "$wwn" && managed_val="${GRN}managed${NC}" || managed_val="${YLW}unmanaged${NC}"
-        [[ "$state" == "Online" ]] && state_val="${GRN}${state}${NC}" || state_val="${RED}${state}${NC}"
-        ptype_short=$(echo "$ptype" | sed 's/Point-To-Point (direct nport connection)/P2P/')
         local label; label=$(wwn_label "$wwn" "target")
-        echo -e "  ${DIM}[${idx}]${NC} ${DIM}${wwn}${NC} (${CYN}${label}${NC})  ${isp}  ${host}  [${state_val}]  ${ptype_short}  [${managed_val}]"
+
+        # isp: and host: — hardware identity fields, always plain values
+        local isp_str host_str
+        isp_str="${CYN}isp:${NC}${isp}"
+        host_str="${CYN}host:${NC}${host}"
+
+        # status: — link state
+        #   Online      = GRN
+        #   Diagnostics = YLW
+        #   Unknown     = DIM
+        #   anything else (Linkdown, Offline, Bypassed, Not Present) = RED
+        local status_val
+        case "$state" in
+            Online)       status_val="${GRN}${state}${NC}" ;;
+            Diagnostics)  status_val="${YLW}${state}${NC}" ;;
+            Unknown)      status_val="${DIM}${state}${NC}" ;;
+            *)            status_val="${RED}${state}${NC}" ;;
+        esac
+
+        # topology: — connection type
+        #   P2P / Loop / FPort / NPort / LPort / NPIV = plain
+        #   Unknown = DIM
+        local ptype_short topo_val
+        ptype_short=$(echo "$ptype" | sed 's/Point-To-Point (direct nport connection)/P2P/')
+        case "$ptype_short" in
+            Unknown) topo_val="${DIM}${ptype_short}${NC}" ;;
+            *)       topo_val="${ptype_short}" ;;
+        esac
+
+        # config: — is this port in the qle_adm configuration?
+        #   managed   = GRN
+        #   unmanaged = YLW
+        local config_val
+        echo "$enabled_ports" | grep -q "$wwn" \
+            && config_val="${GRN}managed${NC}" \
+            || config_val="${YLW}unmanaged${NC}"
+
+        echo -e "  ${DIM}[${idx}]${NC} ${DIM}${wwn}${NC} (${CYN}${label}${NC})  ${isp_str}  ${host_str}  ${CYN}status:${NC}${status_val}  ${CYN}topology:${NC}${topo_val}  ${CYN}config:${NC}${config_val}"
     done
     divider
 }
@@ -5889,7 +5922,8 @@ ${CYN}Status:${NC}
   status                         Full state: modules, ports, sessions, gap analysis.  (st)
                                  Passively captures seen_initiators from active sessions.
   list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN    (lh)
-  list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
+  list-ports                     FC ports with index and labeled fields:    (lp)
+                                 isp:  host:  status:  topology:  config:
   list-initiators                Connected initiators with IO stats; seen history always shown  (li)
   list-extents                   SCST extents. Column order: [idx] name  size  s/n  (le)
                                  groups:[...]  sysfs:[...]
