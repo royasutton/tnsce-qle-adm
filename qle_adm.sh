@@ -4328,11 +4328,10 @@ else:          print(str(v))
             [[ -n "$v_naa"     ]] && _vline2+="${CYN}naa:${NC}${v_naa}  "
             [[ -n "$v_prod_id" ]] && _vline2+="${CYN}prod_id:${NC}${v_prod_id}"
             echo -e "$_vline2"
-        fi
 
-        # Blank line after each extent — provides visual separation,
-        # especially useful in verbose mode with the two extra detail lines.
-        echo
+            # Blank line after verbose detail — visual separation between extents.
+            echo
+        fi
 
         idx=$((idx + 1))
     done < <(get_extents_sorted)
