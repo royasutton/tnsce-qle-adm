@@ -1098,17 +1098,22 @@ but SCST does not re-read it until the next restart.
 
 ```json
 {
+  "config_schema": 3,
   "enabled_ports": [
     "aa:bb:cc:dd:ee:ff:00:01"
   ],
   "open_extents": [
     "data_vol"
   ],
-  "assignments": {
-    "aa:bb:cc:dd:ee:ff:00:10": {
-      "extents": ["backup_vol"],
-      "luns": {"backup_vol": 0}
+  "groups": {
+    "workstation": {
+      "initiators": ["aa:bb:cc:dd:ee:ff:00:10"],
+      "luns": {"backup_vol": 0},
+      "pending_luns": {}
     }
+  },
+  "port_groups": {
+    "aa:bb:cc:dd:ee:ff:00:01": ["workstation"]
   },
   "seen_initiators": {
     "aa:bb:cc:dd:ee:ff:00:10": "2026-05-05 10:28:48"
@@ -1149,9 +1154,11 @@ but SCST does not re-read it until the next restart.
 
 | Key | Description |
 |---|---|
+| `config_schema` | Schema version; current is `3`. Controls migration eligibility. |
 | `enabled_ports` | WWNs of ports activated as FC targets |
-| `open_extents` | Extents mapped to all initiators (default group) |
-| `assignments` | Per-initiator extent mappings with LUN numbers |
+| `open_extents` | Extents mapped to all initiators (SCST default luns group) |
+| `groups` | Named initiator groups. Each entry has `initiators` (WWN list), `luns` (extent→LUN-number map), and `pending_luns` (staged deferred changes). |
+| `port_groups` | Per-port group associations. Maps target port WWN → list of group names attached to that port. |
 | `seen_initiators` | History of connected initiator WWNs with last-seen timestamp. Captured automatically by `status` and `list-initiators`. |
 | `isp_params` | Per-ISP named parameter profiles |
 | `isp_active_profile` | Currently selected profile per ISP type |
