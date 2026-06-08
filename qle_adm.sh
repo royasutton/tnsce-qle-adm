@@ -4086,15 +4086,11 @@ cmd_list_extents() {
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    # Check open_extents
     if '${ext}' in d.get('open_extents', []):
         print('open')
+    elif any('${ext}' in data.get('luns', {}) for data in d.get('groups', {}).values()):
+        print('assigned')
     else:
-        # Check groups
-        for grp, data in d.get('groups', {}).items():
-            if '${ext}' in data.get('luns', {}):
-                print('assigned')
-                exit()
         print('unmapped')
 except:
     print('unmapped')
