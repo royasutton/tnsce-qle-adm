@@ -4195,7 +4195,8 @@ except: pass
             fi
 
             if [[ $lun_found -eq 0 ]]; then
-                live_status="${CYN}sysfs:${NC}${YLW}[no sysfs]${NC}"
+                # [no sysfs] = RED — no mapping at all is an error state
+                live_status="${CYN}sysfs:${NC}[${RED}no sysfs${NC}]"
             else
                 # Session detection: the LUN mapping may be replicated across all
                 # target ports but the initiator session exists on only one port —
@@ -4219,19 +4220,25 @@ except: pass
                     done
                 done
                 if [[ -z "$sess_path" ]]; then
-                    live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
+                    # [mapped] = DIM — in sysfs but no initiator session
+                    live_status="${CYN}sysfs:${NC}[${DIM}mapped${NC}]"
                 else
-                    # [mapped,connected,io] = session has lifetime I/O (read_cmd_count +
-                    #               write_cmd_count > 0). Session-level counter;
-                    #               SCST exposes no per-LUN lifetime counters.
-                    # [mapped,connected]   = session present, zero lifetime I/O.
+                    # Progressive tokens, each individually colored:
+                    #   mapped     = DIM
+                    #   connected  = GRN
+                    #   io         = plain (terminal default; same as serial value)
+                    # Brackets and commas are always plain (NC).
+                    # [mapped,connected,io]: session has lifetime I/O
+                    #   (read_cmd_count + write_cmd_count > 0; session-level counter —
+                    #   SCST exposes no per-LUN lifetime counters)
+                    # [mapped,connected]:   session present, zero lifetime I/O.
                     local rc wc
                     rc=$(hex_to_dec "$(sysfs_read "${sess_path}read_cmd_count"  2>/dev/null || echo 0)")
                     wc=$(hex_to_dec "$(sysfs_read "${sess_path}write_cmd_count" 2>/dev/null || echo 0)")
                     if [[ $(( rc + wc )) -eq 0 ]]; then
-                        live_status="${CYN}sysfs:${NC}${GRN}[mapped,connected]${NC}"
+                        live_status="${CYN}sysfs:${NC}[${DIM}mapped${NC},${GRN}connected${NC}]"
                     else
-                        live_status="${CYN}sysfs:${NC}${GRN}[mapped,connected,io]${NC}"
+                        live_status="${CYN}sysfs:${NC}[${DIM}mapped${NC},${GRN}connected${NC},io]"
                     fi
                 fi
             fi
@@ -4244,32 +4251,44 @@ except: pass
         # Line 1: dev_file  thin  compression  ro  bs  vbs
         # Line 2: naa  prod_id
         if [[ $VERBOSE -eq 1 && -d "$dev_path" ]]; then
-            local v_filename v_thin v_compression v_ro v_bs v_vbs v_naa v_prod_id
+            local v_filename v_thin v_ro v_bs v_naa v_prod_id
+            local v_compression="" v_vbs=""
 
             v_filename=$(sysfs_read "${dev_path}/filename"         2>/dev/null || echo "")
             v_thin=$(    sysfs_read "${dev_path}/thin_provisioned"  2>/dev/null || echo "")
-            v_compression=$(sysfs_read "${dev_path}/compression"   2>/dev/null || echo "")
             v_ro=$(      sysfs_read "${dev_path}/read_only"         2>/dev/null || echo "")
             v_bs=$(      sysfs_read "${dev_path}/blocksize"         2>/dev/null || echo "")
             v_naa=$(     sysfs_read "${dev_path}/naa_id"            2>/dev/null || echo "")
-            v_prod_id=$( sysfs_read "${dev_path}/prod_id"           2>/dev/null | xargs || echo "")
+            v_prod_id=$( sysfs_read "${dev_path}/prod_id"           2>/dev/null || echo "")
 
-            # volblocksize: derive from the zvol dataset path via zfs(8).
-            # filename is e.g. /dev/zvol/tank/g1ed2-debian; strip /dev/zvol/
-            # to get the dataset name tank/g1ed2-debian.
-            v_vbs=""
+            # SCST appends "[key]" to sysfs values it marks as key identifiers.
+            # Strip it from every attr that may carry it (same as usn handling).
+            v_filename="${v_filename%\[key\]}"
+            v_naa="${v_naa%\[key\]}"
+            v_prod_id="${v_prod_id%\[key\]}"
+            # Also strip trailing whitespace from prod_id (SCST pads to 16 chars).
+            v_prod_id="${v_prod_id%"${v_prod_id##*[! ]}"}"
+
+            # compression and volblocksize both come from ZFS — not SCST sysfs.
+            # vdisk_blockio has no compression sysfs node; it's a ZFS property.
+            # Derive the dataset name by stripping /dev/zvol/ from filename.
             if [[ -n "$v_filename" ]]; then
                 local _ds="${v_filename#/dev/zvol/}"
                 if [[ "$_ds" != "$v_filename" ]]; then
-                    local _raw; _raw=$(zfs get -Hp -o value volblocksize "$_ds" 2>/dev/null || echo "")
-                    if [[ -n "$_raw" && "$_raw" != "-" ]]; then
-                        # Format bytes as human-readable (e.g. 16384 -> 16K)
-                        v_vbs=$(python3 -c "
-v=int('${_raw}')
+                    local _zraw
+                    # Fetch both properties in one zfs call to minimise subprocesses.
+                    _zraw=$(zfs get -Hp -o property,value compression,volblocksize "$_ds" 2>/dev/null || echo "")
+                    if [[ -n "$_zraw" ]]; then
+                        v_compression=$(awk '$1=="compression"{print $2}' <<< "$_zraw")
+                        local _vbs_raw; _vbs_raw=$(awk '$1=="volblocksize"{print $2}' <<< "$_zraw")
+                        if [[ -n "$_vbs_raw" && "$_vbs_raw" != "-" ]]; then
+                            v_vbs=$(python3 -c "
+v=int('${_vbs_raw}')
 if v>=1048576: print(f'{v//1048576}M')
 elif v>=1024:  print(f'{v//1024}K')
 else:          print(str(v))
-" 2>/dev/null || echo "$_raw")
+" 2>/dev/null || echo "$_vbs_raw")
+                        fi
                     fi
                 fi
             fi
@@ -4310,6 +4329,10 @@ else:          print(str(v))
             [[ -n "$v_prod_id" ]] && _vline2+="${CYN}prod_id:${NC}${v_prod_id}"
             echo -e "$_vline2"
         fi
+
+        # Blank line after each extent — provides visual separation,
+        # especially useful in verbose mode with the two extra detail lines.
+        echo
 
         idx=$((idx + 1))
     done < <(get_extents_sorted)
