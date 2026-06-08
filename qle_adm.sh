@@ -4164,8 +4164,9 @@ except: pass
             # Live sysfs status - four states:
             #   sysfs:[no sysfs]  - LUN not in sysfs at all; run 'sync --apply'
             #   sysfs:[mapped]    - LUN in sysfs ini_group, no initiator session
-            #   sysfs:[connected] - initiator session present, no command in flight
-            #   sysfs:[active]    - active_commands > 0 on this LUN right now
+            #   sysfs:[connected] - session present, zero lifetime I/O
+            #   sysfs:[i/o]       - session present, lifetime I/O has occurred
+            #                       (session-level counter; SCST has no per-LUN lifetime stats)
             #
             # Detection: each ini_group lun dir contains a 'device' symlink ->
             # ../../../../../../../devices/<extent-name>. Read it to confirm
@@ -4191,25 +4192,23 @@ except: pass
             if [[ $lun_found -eq 0 ]]; then
                 live_status="${CYN}sysfs:${NC}${YLW}[no sysfs]${NC}"
             else
-                # Session detection: sessions are indexed by initiator WWN, not
-                # group name. Look up the group's initiator WWNs from config.json
-                # then search all target sessions for any matching WWN.
-                local group_inits
-                group_inits=$(py_json "
-import json
-try:
-    d = json.load(open('${CONFIG}'))
-    inits = d.get('groups', {}).get('${matched_init_group}', {}).get('initiators', [])
-    print(' '.join(inits))
-except: pass
-")
+                # Session detection: the LUN mapping may be replicated across all
+                # target ports but the initiator session exists on only one port —
+                # not necessarily the port where the lun_dir glob first matched.
+                # Scan all ports: for each port that has this ini_group, check its
+                # registered initiator WWNs (from sysfs — SCST uses the port WWN
+                # from FLOGI which may differ from the node WWN in config.json)
+                # and look for a live session under that same port.
                 local sess_path=""
-                for _tgt_dir in /sys/kernel/scst_tgt/targets/qla2x00t/*/sessions/*/; do
-                    [[ -d "$_tgt_dir" ]] || continue
-                    local _sp_name; _sp_name=$(basename "${_tgt_dir%/}")
-                    for _init_wwn in $group_inits; do
-                        if [[ "${_sp_name,,}" == "${_init_wwn,,}" ]]; then
-                            sess_path="$_tgt_dir"
+                for _tgt in /sys/kernel/scst_tgt/targets/qla2x00t/*/; do
+                    [[ -d "$_tgt" ]] || continue
+                    local _grp_init_dir="${_tgt}ini_groups/${matched_init_group}/initiators"
+                    [[ -d "$_grp_init_dir" ]] || continue
+                    for _init_wwn in $(ls "$_grp_init_dir/" 2>/dev/null); do
+                        [[ "$_init_wwn" == "mgmt" ]] && continue
+                        local _sess="${_tgt}sessions/${_init_wwn}"
+                        if [[ -d "$_sess" ]]; then
+                            sess_path="${_sess}/"
                             break 2
                         fi
                     done
@@ -4217,19 +4216,17 @@ except: pass
                 if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
                 else
-                    # Gate on active_commands for this LUN only.
-                    # [active]    = command(s) in flight on this LUN right now.
-                    # [connected] = session present, no command in flight.
-                    # Session-level lifetime IO counters are not used: they
-                    # accumulate across all LUNs and would make every extent
-                    # in the group appear active after any one LUN is used.
-                    local lun_path="${sess_path}lun${matched_lun_n}"
-                    local ac
-                    ac=$(hex_to_dec "$(sysfs_read "${lun_path}/active_commands" 2>/dev/null || echo 0)")
-                    if [[ $ac -eq 0 ]]; then
+                    # [i/o]       = session has lifetime I/O (read_cmd_count +
+                    #               write_cmd_count > 0). Session-level counter;
+                    #               SCST exposes no per-LUN lifetime counters.
+                    # [connected] = session present, zero lifetime I/O.
+                    local rc wc
+                    rc=$(hex_to_dec "$(sysfs_read "${sess_path}read_cmd_count"  2>/dev/null || echo 0)")
+                    wc=$(hex_to_dec "$(sysfs_read "${sess_path}write_cmd_count" 2>/dev/null || echo 0)")
+                    if [[ $(( rc + wc )) -eq 0 ]]; then
                         live_status="${CYN}sysfs:${NC}${GRN}[connected]${NC}"
                     else
-                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac})${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[i/o]${NC}"
                     fi
                 fi
             fi
@@ -4320,8 +4317,8 @@ cmd_list_initiators() {
         local init_label tgt_label
         init_label=$(wwn_label "$init_wwn" "initiator")
         tgt_label=$(wwn_label "$tgt_wwn" "target")
-        echo -e "  ${DIM}[${i}]${NC} ${GRN}${SYM_BULLET}${NC} ${DIM}${init_wwn}${NC} (${CYN}${init_label}${NC}) ${SYM_INFO} ${DIM}${tgt_wwn}${NC} (${CYN}${tgt_label}${NC})"
-        echo -e "       ${CYN}cmds:${NC}${cmds}  ${CYN}R:${NC}${rc} (${rk} KB)  ${CYN}W:${NC}${wc} (${wk} KB)"
+        echo -e "  ${DIM}[${i}]${NC} ${GRN}${SYM_BULLET}${NC} ${DIM}${init_wwn}${NC} (${CYN}${init_label}${NC}) ${DIM}${SYM_INFO}${NC} ${DIM}${tgt_wwn}${NC} (${CYN}${tgt_label}${NC})"
+        echo -e "       ${CYN}cmds:${NC}${cmds}  ${CYN}R:${NC}${rc} cmds ${rk} KB  ${CYN}W:${NC}${wc} cmds ${wk} KB"
         cfg_record_seen_initiator "$init_wwn"
         i=$((i + 1))
         found=$((found + 1))
@@ -5796,7 +5793,7 @@ ${CYN}Status:${NC}
   list-extents                   SCST extents. Column order: [idx] name  size  s/n  (le)
                                  config:[...]  sysfs:[...]
                                  config:[UNMAPPED]  config:[OPEN]  config:[group]  config:[OPEN,group]
-                                 sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[connected]  sysfs:[active]
+                                 sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[connected]  sysfs:[i/o]
   list-mapping                   Full LUN mapping topology: groups with initiators,
                                  LUN mappings, and port associations. Groups with no
                                  mappings shown as unconfigured. Port-centric summary
