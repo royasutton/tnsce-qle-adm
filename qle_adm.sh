@@ -4071,7 +4071,7 @@ cmd_list_extents() {
     local idx=0
     while IFS= read -r ext; do
         [[ -z "$ext" ]] && continue
-        local status live_status assigned assigned_inits _parts _w _lbl
+        local status live_status _w stale_tag=""
 
         # Stale check: extent is in config.json but not in scst.conf.
         local stale=0
@@ -4079,27 +4079,75 @@ cmd_list_extents() {
             echo "$scst_devices" | grep -q "^${ext}$" || stale=1
         fi
 
-        # Config-level status: [open] = world-accessible, [per-init] = per-initiator
-        # assignment exists in config, [unmapped] = no assignment of any kind.
-        local has_assignment
-        has_assignment=$(py_json "
+        # Size and serial number from SCST sysfs — reported immediately after
+        # the extent name as physical facts about the device.
+        local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
+        local size="" serial=""
+        if [[ -d "$dev_path" ]]; then
+            local size_mb_raw; size_mb_raw=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "")
+            if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
+                size=$(python3 -c "
+mb = int('${size_mb_raw}')
+gib = mb / 1024.0
+mib = mb
+kib = mb * 1024
+if gib >= 1.0:
+    print(f'{gib:6.2f} GiB')
+elif mib >= 1:
+    print(f'{mib:6.2f} MiB')
+else:
+    print(f'{kib:6.2f} KiB')
+" 2>/dev/null || echo "${size_mb_raw} MB")
+            fi
+            # Read the SCSI Unit Serial Number (USN) directly from SCST sysfs.
+            # This is the serial the initiator sees via INQUIRY page 0x80,
+            # and is always present when the device is registered. Avoids
+            # probing udevadm which has no serial data for zvols.
+            local usn; usn=$(sysfs_read "${dev_path}/usn" 2>/dev/null || echo "")
+            usn="${usn%\[key\]}"
+            [[ -n "$usn" ]] && serial="${CYN}s/n:${NC} ${DIM}${usn}${NC}"
+        fi
+
+        # config:[...] — unified config state. Brackets contain OPEN and/or group
+        # names. Both can appear simultaneously (extent is open AND in a group).
+        # OPEN appears first if present; group names follow in sorted order.
+        # Examples: config:[UNMAPPED]  config:[OPEN]  config:[g1ed2]  config:[OPEN,g1ed2,vostro]
+        status=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    if '${ext}' in d.get('open_extents', []):
-        print('open')
-    elif any('${ext}' in data.get('luns', {}) for data in d.get('groups', {}).values()):
-        print('assigned')
-    else:
-        print('unmapped')
+    is_open = '${ext}' in d.get('open_extents', [])
+    grps = sorted(g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{}))
+    parts = (['OPEN'] if is_open else []) + grps
+    print(','.join(parts) if parts else 'UNMAPPED')
 except:
-    print('unmapped')
+    print('UNMAPPED')
 ")
-        case "$has_assignment" in
-            open)     status="${GRN}cfg:[open]${NC}" ;;
-            assigned) status="${DIM}cfg:[in group]${NC}" ;;
-            *)        status="${DIM}cfg:[unmapped]${NC}" ;;
-        esac
+        if [[ "$status" == "UNMAPPED" ]]; then
+            status="${DIM}config:[UNMAPPED]${NC}"
+            stale_tag=""
+        else
+            # Build stale remediation hints (one line per group) before wrapping
+            if [[ $stale -eq 1 ]]; then
+                for _w in $(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    grps = sorted(g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{}))
+    print(' '.join(grps))
+except: pass
+"); do
+                    stale_tag+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
+                done
+            fi
+            if [[ "$status" == OPEN* ]] && [[ "$status" != *,* ]]; then
+                status="${GRN}config:[OPEN]${NC}"
+            elif [[ "$status" == OPEN* ]]; then
+                status="${GRN}config:[${status}]${NC}"
+            else
+                status="${DIM}config:[${status}]${NC}"
+            fi
+        fi
 
         if [[ $stale -eq 1 ]]; then
             live_status="${YLW}[stale - not in scst.conf]${NC}"
@@ -4164,58 +4212,7 @@ except:
             fi
         fi
 
-        assigned=""
-        assigned_inits=""
-        assigned_inits=$(py_json "
-import json
-try:
-    d = json.load(open('${CONFIG}'))
-    grps = [g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{})]
-    if grps: print(' '.join(grps))
-except: pass
-")
-        if [[ -n "$assigned_inits" ]]; then
-            _parts=()
-            for _w in $assigned_inits; do
-                _parts+=("${WHT}${_w}${NC}")
-            done
-            local stale_tag=""
-            if [[ $stale -eq 1 ]]; then
-                local _cmds=""
-                for _w in $assigned_inits; do
-                    _cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
-                done
-                stale_tag="$_cmds"
-            fi
-            assigned="${CYN}in groups:${NC} $(IFS=', '; echo "${_parts[*]}")"
-        fi
-        local dev_path="/sys/kernel/scst_tgt/devices/${ext}"
-        local size="" serial=""
-        if [[ -d "$dev_path" ]]; then
-            local size_mb_raw; size_mb_raw=$(sysfs_read "${dev_path}/size_mb" 2>/dev/null || echo "")
-            if [[ -n "$size_mb_raw" && "$size_mb_raw" =~ ^[0-9]+$ ]]; then
-                size=$(python3 -c "
-mb = int('${size_mb_raw}')
-gib = mb / 1024.0
-mib = mb
-kib = mb * 1024
-if gib >= 1.0:
-    print(f'{gib:6.2f} GiB')
-elif mib >= 1:
-    print(f'{mib:6.2f} MiB')
-else:
-    print(f'{kib:6.2f} KiB')
-" 2>/dev/null || echo "${size_mb_raw} MB")
-            fi
-            # Read the SCSI Unit Serial Number (USN) directly from SCST sysfs.
-            # This is the serial the initiator sees via INQUIRY page 0x80,
-            # and is always present when the device is registered. Avoids
-            # probing udevadm which has no serial data for zvols.
-            local usn; usn=$(sysfs_read "${dev_path}/usn" 2>/dev/null || echo "")
-            usn="${usn%\[key\]}"
-            [[ -n "$usn" ]] && serial="${CYN}s/n:${NC} ${DIM}${usn}${NC}"
-        fi
-        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}  ${status}  ${live_status}${serial:+  ${serial}}${assigned:+  ${assigned}}${stale_tag}"
+        echo -e "  [${idx}] ${WHT}${ext}${NC}  ${size}${serial:+  ${serial}}  ${status}  ${live_status}${stale_tag}"
         idx=$((idx + 1))
     done < <(get_extents_sorted)
 
@@ -4240,26 +4237,39 @@ except: pass
     if [[ -n "$stale_extents" ]]; then
         while IFS= read -r ext; do
             [[ -z "$ext" ]] && continue
-            local assigned_inits _parts _w _lbl
-            assigned_inits=$(py_json "
+            local _w cfg_label="" unmap_cmds=""
+            local grp_list
+            grp_list=$(py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    grps = [g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{})]
-    if grps: print(' '.join(grps))
-except: pass
+    is_open = '${ext}' in d.get('open_extents', [])
+    grps = sorted(g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{}))
+    parts = (['OPEN'] if is_open else []) + grps
+    print(','.join(parts) if parts else 'UNMAPPED')
+except:
+    print('UNMAPPED')
 ")
-            local assigned=""
-            local unassign_cmds=""
-            if [[ -n "$assigned_inits" ]]; then
-                _parts=()
-                for _w in $assigned_inits; do
-                    _parts+=("${WHT}${_w}${NC}")
-                    unassign_cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
-                done
-                assigned="${CYN}assigned to:${NC} $(IFS=', '; echo "${_parts[*]}")"
+            if [[ "$grp_list" == "UNMAPPED" ]]; then
+                cfg_label="${DIM}config:[UNMAPPED]${NC}"
+            elif [[ "$grp_list" == OPEN* ]] && [[ "$grp_list" != *,* ]]; then
+                cfg_label="${GRN}config:[OPEN]${NC}"
+            elif [[ "$grp_list" == OPEN* ]]; then
+                cfg_label="${GRN}config:[${grp_list}]${NC}"
+            else
+                cfg_label="${DIM}config:[${grp_list}]${NC}"
             fi
-            echo -e "  [*] ${YLW}${ext}${NC}  ${YLW}[stale - not in scst.conf]${NC}${assigned:+  ${assigned}}${unassign_cmds}"
+            for _w in $(py_json "
+import json
+try:
+    d = json.load(open('${CONFIG}'))
+    grps = sorted(g for g,data in d.get('groups',{}).items() if '${ext}' in data.get('luns',{}))
+    print(' '.join(grps))
+except: pass
+"); do
+                unmap_cmds+=$'\n'"      ${DIM}run: group unmap ${_w} ${ext}${NC}"
+            done
+            echo -e "  [*] ${YLW}${ext}${NC}  ${cfg_label}  ${YLW}[stale - not in scst.conf]${NC}${unmap_cmds}"
             idx=$((idx + 1))
         done <<< "$stale_extents"
     fi
@@ -5760,8 +5770,10 @@ ${CYN}Status:${NC}
   list-hba                       Per-port detail: ISP type, firmware, PCI link, WWN    (lh)
   list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
   list-initiators                Connected initiators with IO stats; seen history always shown  (li)
-  list-extents                   SCST extents with size, config state, serial number,  (le)
-                                 and live sysfs state [no sysfs|mapped|connected|active]
+  list-extents                   SCST extents. Column order: [idx] name  size  s/n  (le)
+                                 config:[...]  sysfs:[...]
+                                 config:[UNMAPPED]  config:[OPEN]  config:[group]  config:[OPEN,group]
+                                 sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[connected]  sysfs:[active]
   list-mapping                   Full LUN mapping topology: groups with initiators,
                                  LUN mappings, and port associations. Groups with no
                                  mappings shown as unconfigured. Port-centric summary
