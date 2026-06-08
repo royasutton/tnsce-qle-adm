@@ -242,7 +242,7 @@ from the install directory.
 |---|---|
 | `--dry-run` | Print all actions without executing any writes |
 | `--yes` | Skip all interactive confirmations |
-| `--verbose` | Extra diagnostic output |
+| `--verbose` / `-v` | Extra diagnostic output; for `list-extents` adds a device detail block (dev_file, thin, compression, ro, bs, vbs, naa, prod_id) |
 | `--home <path>` | Override QLE_ADM_HOME for this invocation |
 | `--port N` | Select FC port by index from `list-ports` |
 | `--group <name>` | Select initiator by index from `list-initiators` |
@@ -275,7 +275,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
-| `list-extents` | `le` | SCST extents. Column order: `[idx] name  size  s/n  groups:[...]  sysfs:[...]`. `groups:[...]` is a unified config state field — brackets contain `OPEN` and/or group names, both reported if true: `groups:[UNMAPPED]` not in any group or open access; `groups:[OPEN]` world-accessible; `groups:[g1ed2]` in one group; `groups:[OPEN,g1ed2]` open and in a group; `groups:[g1ed2,vostro]` in multiple groups. `sysfs:[...]` is the live SCST kernel state and is progressive — each state adds to the previous tokens: `sysfs:[no sysfs]` config exists but not yet applied — run `sync --apply`; `sysfs:[mapped]` LUN in sysfs, no initiator session; `sysfs:[mapped,connected]` session present, zero lifetime I/O; `sysfs:[mapped,connected,io]` session present with lifetime I/O recorded (session-level counter — SCST exposes no per-LUN lifetime stats; all LUNs in the same group reflect the same session). The two columns are sourced independently; `groups:[UNMAPPED] sysfs:[mapped]` means a LUN mapping exists in sysfs that config.json has no record of — run `sync` to reconcile. |
+| `list-extents` | `le` | SCST extents. Column order: `[idx] name  size  s/n  groups:[...]  sysfs:[...]`. `groups:[...]` is a unified config state field — brackets contain `OPEN` and/or group names, both reported if true: `groups:[UNMAPPED]` not in any group or open access; `groups:[OPEN]` world-accessible; `groups:[g1ed2]` in one group; `groups:[OPEN,g1ed2]` open and in a group; `groups:[g1ed2,vostro]` in multiple groups. `sysfs:[...]` is the live SCST kernel state and is progressive — each state adds to the previous tokens: `sysfs:[no sysfs]` config exists but not yet applied — run `sync --apply`; `sysfs:[mapped]` LUN in sysfs, no initiator session; `sysfs:[mapped,connected]` session present, zero lifetime I/O; `sysfs:[mapped,connected,io]` session present with lifetime I/O recorded (session-level counter — SCST exposes no per-LUN lifetime stats; all LUNs in the same group reflect the same session). The two columns are sourced independently; `groups:[UNMAPPED] sysfs:[mapped]` means a LUN mapping exists in sysfs that config.json has no record of — run `sync` to reconcile. With `--verbose` / `-v`, two additional lines are printed per extent: `dev_file:` `thin:` `compression:` `ro:` `bs:` `vbs:` on the first line, and `naa:` `prod_id:` on the second. `thin` and `ro` are decoded as `Y`/`N`; `ro:Y` and `thin:N` are highlighted in yellow. |
 | `list-mapping` | `lm` | Full LUN mapping topology: groups, initiators, LUN mappings, port associations, and a port-centric summary. `list-groups` / `lg` retained as aliases. |
 | `list-all` | `la` | All list commands in sequence |
 

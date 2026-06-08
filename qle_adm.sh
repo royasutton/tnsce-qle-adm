@@ -4238,6 +4238,79 @@ except: pass
         fi
 
         echo -e "  ${DIM}[${idx}]${NC} ${ext}  ${size}  ${serial:+${serial}  }${status}  ${live_status}${stale_tag}"
+
+        # Verbose detail block: additional device attributes from SCST sysfs.
+        # Only printed when VERBOSE=1 (--verbose / -v).
+        # Line 1: dev_file  thin  compression  ro  bs  vbs
+        # Line 2: naa  prod_id
+        if [[ $VERBOSE -eq 1 && -d "$dev_path" ]]; then
+            local v_filename v_thin v_compression v_ro v_bs v_vbs v_naa v_prod_id
+
+            v_filename=$(sysfs_read "${dev_path}/filename"         2>/dev/null || echo "")
+            v_thin=$(    sysfs_read "${dev_path}/thin_provisioned"  2>/dev/null || echo "")
+            v_compression=$(sysfs_read "${dev_path}/compression"   2>/dev/null || echo "")
+            v_ro=$(      sysfs_read "${dev_path}/read_only"         2>/dev/null || echo "")
+            v_bs=$(      sysfs_read "${dev_path}/blocksize"         2>/dev/null || echo "")
+            v_naa=$(     sysfs_read "${dev_path}/naa_id"            2>/dev/null || echo "")
+            v_prod_id=$( sysfs_read "${dev_path}/prod_id"           2>/dev/null | xargs || echo "")
+
+            # volblocksize: derive from the zvol dataset path via zfs(8).
+            # filename is e.g. /dev/zvol/tank/g1ed2-debian; strip /dev/zvol/
+            # to get the dataset name tank/g1ed2-debian.
+            v_vbs=""
+            if [[ -n "$v_filename" ]]; then
+                local _ds="${v_filename#/dev/zvol/}"
+                if [[ "$_ds" != "$v_filename" ]]; then
+                    local _raw; _raw=$(zfs get -Hp -o value volblocksize "$_ds" 2>/dev/null || echo "")
+                    if [[ -n "$_raw" && "$_raw" != "-" ]]; then
+                        # Format bytes as human-readable (e.g. 16384 -> 16K)
+                        v_vbs=$(python3 -c "
+v=int('${_raw}')
+if v>=1048576: print(f'{v//1048576}M')
+elif v>=1024:  print(f'{v//1024}K')
+else:          print(str(v))
+" 2>/dev/null || echo "$_raw")
+                    fi
+                fi
+            fi
+
+            # Decode 0/1 -> Y/N with color:
+            #   thin:  Y=plain (expected for zvols), N=YLW (unusual)
+            #   ro:    N=DIM  (normal),              Y=YLW (attention)
+            local _thin_str _ro_str
+            if [[ "$v_thin" == "1" ]]; then
+                _thin_str="Y"
+            elif [[ "$v_thin" == "0" ]]; then
+                _thin_str="${YLW}N${NC}"
+            else
+                _thin_str="${DIM}?${NC}"
+            fi
+
+            if [[ "$v_ro" == "0" ]]; then
+                _ro_str="${DIM}N${NC}"
+            elif [[ "$v_ro" == "1" ]]; then
+                _ro_str="${YLW}Y${NC}"
+            else
+                _ro_str="${DIM}?${NC}"
+            fi
+
+            # Line 1: dev_file  thin  compression  ro  bs  vbs
+            local _vline1="      "
+            [[ -n "$v_filename"    ]] && _vline1+="${CYN}dev_file:${NC}${v_filename}  "
+            _vline1+="${CYN}thin:${NC}${_thin_str}  "
+            [[ -n "$v_compression" ]] && _vline1+="${CYN}compression:${NC}${v_compression}  "
+            _vline1+="${CYN}ro:${NC}${_ro_str}  "
+            [[ -n "$v_bs"  ]] && _vline1+="${CYN}bs:${NC}${v_bs}  "
+            [[ -n "$v_vbs" ]] && _vline1+="${CYN}vbs:${NC}${v_vbs}"
+            echo -e "$_vline1"
+
+            # Line 2: naa  prod_id
+            local _vline2="      "
+            [[ -n "$v_naa"     ]] && _vline2+="${CYN}naa:${NC}${v_naa}  "
+            [[ -n "$v_prod_id" ]] && _vline2+="${CYN}prod_id:${NC}${v_prod_id}"
+            echo -e "$_vline2"
+        fi
+
         idx=$((idx + 1))
     done < <(get_extents_sorted)
 
@@ -5776,7 +5849,7 @@ Log          : log  show [--tail N] | boot | last [N] | clear | trim [N]
 
 Global       : examples  help  version
                --port N   --ext N
-               --dry-run  --yes  --verbose  --home <path>
+               --dry-run  --yes  --verbose (-v)  --home <path>
 USAGE_EOF
 )"
     printf "%b\n" "${DIM}Config: ${QLE_ADM_HOME}/config.json  |  Log: ${LOG}${NC}"
@@ -5800,6 +5873,7 @@ ${CYN}Status:${NC}
                                  groups:[...]  sysfs:[...]
                                  groups:[UNMAPPED]  groups:[OPEN]  groups:[group]  groups:[OPEN,group]
                                  sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[mapped,connected]  sysfs:[mapped,connected,io]
+                                 -v: dev_file  thin  compression  ro  bs  vbs  /  naa  prod_id
   list-mapping                   Full LUN mapping topology: groups with initiators,
                                  LUN mappings, and port associations. Groups with no
                                  mappings shown as unconfigured. Port-centric summary
@@ -5950,7 +6024,9 @@ ${CYN}Subcommands:${NC}
 ${CYN}Global Options:${NC}
   --dry-run                      Print actions without executing any writes
   --yes                          Skip all interactive confirmations
-  --verbose                      Extra diagnostic output
+  --verbose (-v)                 Extra diagnostic output; for list-extents adds
+                                 device detail (dev_file, thin, compression, ro,
+                                 bs, vbs, naa, prod_id)
   --home <path>                  Override QLE_ADM_HOME for this invocation
 
 ${CYN}Index Selection:${NC}
@@ -6170,7 +6246,7 @@ main() {
         case "$1" in
             --dry-run)  DRY_RUN=1; shift ;;
             --yes)      YES=1; shift ;;
-            --verbose)  VERBOSE=1; shift ;;
+            --verbose|-v) VERBOSE=1; shift ;;
             --home)     QLE_ADM_HOME="$2"; CONFIG="${QLE_ADM_HOME}/config.json"
                         FIRMWARE_DIR="${QLE_ADM_HOME}/firmware"
                         LOG="${QLE_ADM_HOME}/qle_adm.log"

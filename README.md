@@ -157,7 +157,7 @@ chmod +x ./qle_adm.sh
 ./qle_adm.sh status
 
 # Map (open access) extent on a port for initiator access by index
-./qle_adm.sh list-extents
+./qle_adm.sh list-extents          # add -v for device detail (dev_file, thin, compression, ro, bs, vbs, naa, prod_id)
 ./qle_adm.sh list-ports
 
 ./qle_adm.sh open --ext 0
