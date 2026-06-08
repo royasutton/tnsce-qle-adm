@@ -107,6 +107,13 @@ The default firmware source is the HBA primary flash slot (`ql2xfwloadbin=0`). T
 
 Before installing, confirm on TrueNAS:
 
+0. **A supported QLogic Fibre Channel HBA** — any card supported by the
+   `qla2xxx` kernel driver should work. The kernel documentation states that
+   `qla2xxx` supports all QLogic FC PCI and PCIe host adaptors with firmware
+   support for ISP21xx, ISP22xx, ISP23xx, ISP24xx, ISP25xx, and newer chip
+   generations. ISP2432 and ISP2532 are confirmed working in target mode on
+   kernel 6.12 with `qla2xxx_scst` 10.02.09.400-k.
+
 1. **SCST is running:**
    ```bash
    systemctl is-active scst
@@ -268,7 +275,7 @@ PATH="${PATH}:${QLE_ADM_HOME}"
 | `list-hba` | `lh` | Per-port detail: ISP type, firmware versions, PCIe link, WWN |
 | `list-ports` | `lp` | FC ports with index, state, topology, managed status |
 | `list-initiators` | `li` | Connected initiators with IO stats; previously seen initiators always shown |
-| `list-extents` | `le` | SCST extents. Column order: `[idx] name  size  s/n  config:[...]  sysfs:[...]`. `config:[...]` is a unified config state field — brackets contain `OPEN` and/or group names, both reported if true: `config:[UNMAPPED]` not in any group or open access; `config:[OPEN]` world-accessible; `config:[g1ed2]` in one group; `config:[OPEN,g1ed2]` open and in a group; `config:[g1ed2,vostro]` in multiple groups. `sysfs:[...]` is the live SCST kernel state: `sysfs:[no sysfs]` config exists but not yet applied — run `sync --apply`; `sysfs:[mapped]` LUN in sysfs, no initiator session; `sysfs:[connected]` session present, zero lifetime I/O; `sysfs:[i/o]` session present with lifetime I/O recorded (session-level counter — SCST exposes no per-LUN lifetime stats; all LUNs in the same group reflect the same session). The two columns are sourced independently; `config:[UNMAPPED] sysfs:[mapped]` means a LUN mapping exists in sysfs that config.json has no record of — run `sync` to reconcile. |
+| `list-extents` | `le` | SCST extents. Column order: `[idx] name  size  s/n  groups:[...]  sysfs:[...]`. `groups:[...]` is a unified config state field — brackets contain `OPEN` and/or group names, both reported if true: `groups:[UNMAPPED]` not in any group or open access; `groups:[OPEN]` world-accessible; `groups:[g1ed2]` in one group; `groups:[OPEN,g1ed2]` open and in a group; `groups:[g1ed2,vostro]` in multiple groups. `sysfs:[...]` is the live SCST kernel state and is progressive — each state adds to the previous tokens: `sysfs:[no sysfs]` config exists but not yet applied — run `sync --apply`; `sysfs:[mapped]` LUN in sysfs, no initiator session; `sysfs:[mapped,connected]` session present, zero lifetime I/O; `sysfs:[mapped,connected,io]` session present with lifetime I/O recorded (session-level counter — SCST exposes no per-LUN lifetime stats; all LUNs in the same group reflect the same session). The two columns are sourced independently; `groups:[UNMAPPED] sysfs:[mapped]` means a LUN mapping exists in sysfs that config.json has no record of — run `sync` to reconcile. |
 | `list-mapping` | `lm` | Full LUN mapping topology: groups, initiators, LUN mappings, port associations, and a port-centric summary. `list-groups` / `lg` retained as aliases. |
 | `list-all` | `la` | All list commands in sequence |
 

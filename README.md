@@ -117,8 +117,11 @@ qle_adm.sh port enable --port 0
 ## What you need
 
 - **TrueNAS SCALE CE** (tested on 25.10.x, kernel 6.12)
-- **QLogic ISP2432 or ISP2532 HBA** — both confirmed working in target mode
-  on kernel 6.12 with `qla2xxx_scst` 10.02.09.400-k
+- **QLogic Fibre Channel HBA** supported by the `qla2xxx` kernel driver —
+  this includes all QLogic FC PCI and PCIe host adaptors with firmware support
+  for ISP21xx, ISP22xx, ISP23xx, ISP24xx, ISP25xx, and newer chip generations.
+  ISP2432 and ISP2532 are confirmed working in target mode on kernel 6.12 with
+  `qla2xxx_scst` 10.02.09.400-k.
 - **SCST running**: verify with `systemctl is-active scst`
 - **A ZFS zvol** registered as an SCST block device in `/etc/scst.conf`
 - **A dataset under `/mnt`** for persistent storage of the script and config

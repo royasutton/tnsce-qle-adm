@@ -845,15 +845,20 @@ wwn_port_index() {
             [[ -n "$pci" ]] && echo "$pci" && return
         fi
     done
-    # Fall back to stored port index in config
+    # Fall back to stored port index in config; return '?' when not known
     py_json "
 import json
 try:
     d = json.load(open('${CONFIG}'))
-    entry = d.get('wwn_names', {}).get('${wwn}', {})
-    print(entry.get('port', 0))
+    names = d.get('wwn_names', {})
+    if '${wwn}' not in names:
+        print('?')
+    else:
+        entry = names['${wwn}']
+        v = entry.get('port', None)
+        print(str(v) if v is not None else '?')
 except:
-    print(0)
+    print('?')
 "
 }
 
@@ -4117,10 +4122,10 @@ else:
             [[ -n "$usn" ]] && serial="${CYN}s/n:${NC}${usn}"
         fi
 
-        # config:[...] — unified config state. Brackets contain OPEN and/or group
+        # groups:[...] — unified config state. Brackets contain OPEN and/or group
         # names. Both can appear simultaneously (extent is open AND in a group).
         # OPEN appears first if present; group names follow in sorted order.
-        # Examples: config:[UNMAPPED]  config:[OPEN]  config:[g1ed2]  config:[OPEN,g1ed2,vostro]
+        # Examples: groups:[UNMAPPED]  groups:[OPEN]  groups:[g1ed2]  groups:[OPEN,g1ed2,vostro]
         status=$(py_json "
 import json
 try:
@@ -4133,7 +4138,7 @@ except:
     print('UNMAPPED')
 ")
         if [[ "$status" == "UNMAPPED" ]]; then
-            status="${CYN}config:${NC}${DIM}[UNMAPPED]${NC}"
+            status="${CYN}groups:${NC}${DIM}[UNMAPPED]${NC}"
             stale_tag=""
         else
             # Build stale remediation hints (one line per group) before wrapping
@@ -4150,23 +4155,23 @@ except: pass
                 done
             fi
             if [[ "$status" == OPEN* ]] && [[ "$status" != *,* ]]; then
-                status="${CYN}config:${NC}${GRN}[OPEN]${NC}"
+                status="${CYN}groups:${NC}${GRN}[OPEN]${NC}"
             elif [[ "$status" == OPEN* ]]; then
-                status="${CYN}config:${NC}${GRN}[${status}]${NC}"
+                status="${CYN}groups:${NC}${GRN}[${status}]${NC}"
             else
-                status="${CYN}config:${NC}[${status}]"
+                status="${CYN}groups:${NC}[${status}]"
             fi
         fi
 
         if [[ $stale -eq 1 ]]; then
             live_status="${YLW}[stale - not in scst.conf]${NC}"
         else
-            # Live sysfs status - four states:
-            #   sysfs:[no sysfs]  - LUN not in sysfs at all; run 'sync --apply'
-            #   sysfs:[mapped]    - LUN in sysfs ini_group, no initiator session
-            #   sysfs:[connected] - session present, zero lifetime I/O
-            #   sysfs:[i/o]       - session present, lifetime I/O has occurred
-            #                       (session-level counter; SCST has no per-LUN lifetime stats)
+            # Live sysfs status - progressive states (each adds to previous):
+            #   sysfs:[no sysfs]              - LUN not in sysfs at all; run 'sync --apply'
+            #   sysfs:[mapped]                - LUN in sysfs ini_group, no initiator session
+            #   sysfs:[mapped,connected]      - session present, zero lifetime I/O
+            #   sysfs:[mapped,connected,io]   - session present, lifetime I/O has occurred
+            #                                   (session-level counter; SCST has no per-LUN lifetime stats)
             #
             # Detection: each ini_group lun dir contains a 'device' symlink ->
             # ../../../../../../../devices/<extent-name>. Read it to confirm
@@ -4216,17 +4221,17 @@ except: pass
                 if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
                 else
-                    # [i/o]       = session has lifetime I/O (read_cmd_count +
+                    # [mapped,connected,io] = session has lifetime I/O (read_cmd_count +
                     #               write_cmd_count > 0). Session-level counter;
                     #               SCST exposes no per-LUN lifetime counters.
-                    # [connected] = session present, zero lifetime I/O.
+                    # [mapped,connected]   = session present, zero lifetime I/O.
                     local rc wc
                     rc=$(hex_to_dec "$(sysfs_read "${sess_path}read_cmd_count"  2>/dev/null || echo 0)")
                     wc=$(hex_to_dec "$(sysfs_read "${sess_path}write_cmd_count" 2>/dev/null || echo 0)")
                     if [[ $(( rc + wc )) -eq 0 ]]; then
-                        live_status="${CYN}sysfs:${NC}${GRN}[connected]${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[mapped,connected]${NC}"
                     else
-                        live_status="${CYN}sysfs:${NC}${GRN}[i/o]${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[mapped,connected,io]${NC}"
                     fi
                 fi
             fi
@@ -4271,13 +4276,13 @@ except:
     print('UNMAPPED')
 ")
             if [[ "$grp_list" == "UNMAPPED" ]]; then
-                cfg_label="${CYN}config:${NC}${DIM}[UNMAPPED]${NC}"
+                cfg_label="${CYN}groups:${NC}${DIM}[UNMAPPED]${NC}"
             elif [[ "$grp_list" == OPEN* ]] && [[ "$grp_list" != *,* ]]; then
-                cfg_label="${CYN}config:${NC}${GRN}[OPEN]${NC}"
+                cfg_label="${CYN}groups:${NC}${GRN}[OPEN]${NC}"
             elif [[ "$grp_list" == OPEN* ]]; then
-                cfg_label="${CYN}config:${NC}${GRN}[${grp_list}]${NC}"
+                cfg_label="${CYN}groups:${NC}${GRN}[${grp_list}]${NC}"
             else
-                cfg_label="${CYN}config:${NC}[${grp_list}]"
+                cfg_label="${CYN}groups:${NC}[${grp_list}]"
             fi
             for _w in $(py_json "
 import json
@@ -4459,7 +4464,8 @@ try:
 except: pass
 ")
             if [[ -n "$port_grps" ]]; then
-                echo -e "  ${DIM}${pwwn}${NC} (${CYN}${plbl}${NC}): ${port_grps}"
+                local grp_csv; grp_csv=$(echo "$port_grps" | tr ' ' ',')
+                echo -e "  ${DIM}${pwwn}${NC} (${CYN}${plbl}${NC}): ${CYN}groups:${NC}[${grp_csv}]"
             else
                 echo -e "  ${DIM}${pwwn}${NC} (${CYN}${plbl}${NC}): ${YLW}(no groups attached)${NC}"
             fi
@@ -5791,9 +5797,9 @@ ${CYN}Status:${NC}
   list-ports                     FC ports with managed/unmanaged state and index [N]    (lp)
   list-initiators                Connected initiators with IO stats; seen history always shown  (li)
   list-extents                   SCST extents. Column order: [idx] name  size  s/n  (le)
-                                 config:[...]  sysfs:[...]
-                                 config:[UNMAPPED]  config:[OPEN]  config:[group]  config:[OPEN,group]
-                                 sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[connected]  sysfs:[i/o]
+                                 groups:[...]  sysfs:[...]
+                                 groups:[UNMAPPED]  groups:[OPEN]  groups:[group]  groups:[OPEN,group]
+                                 sysfs:[no sysfs]  sysfs:[mapped]  sysfs:[mapped,connected]  sysfs:[mapped,connected,io]
   list-mapping                   Full LUN mapping topology: groups with initiators,
                                  LUN mappings, and port associations. Groups with no
                                  mappings shown as unconfigured. Port-centric summary
