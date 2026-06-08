@@ -4217,17 +4217,19 @@ except: pass
                 if [[ -z "$sess_path" ]]; then
                     live_status="${CYN}sysfs:${NC}${DIM}[mapped]${NC}"
                 else
-                    local rc wc rk wk ac
-                    rc=$(hex_to_dec "$(sysfs_read "${sess_path}/read_cmd_count"  2>/dev/null || echo 0)")
-                    wc=$(hex_to_dec "$(sysfs_read "${sess_path}/write_cmd_count" 2>/dev/null || echo 0)")
-                    rk=$(hex_to_dec "$(sysfs_read "${sess_path}/read_io_count_kb"  2>/dev/null || echo 0)")
-                    wk=$(hex_to_dec "$(sysfs_read "${sess_path}/write_io_count_kb" 2>/dev/null || echo 0)")
-                    ac=$(hex_to_dec "$(sysfs_read "${sess_path}/lun${matched_lun_n}/active_commands" 2>/dev/null || echo 0)")
-                    local total_io=$(( rc + wc ))
-                    if [[ $total_io -eq 0 ]]; then
+                    # Use per-LUN counters only — session-level counters accumulate
+                    # across all LUNs in the session and would make every extent in
+                    # the group appear active whenever any one of them has seen I/O.
+                    local lun_path="${sess_path}lun${matched_lun_n}"
+                    local ac rk wk
+                    ac=$(hex_to_dec "$(sysfs_read "${lun_path}/active_commands"    2>/dev/null || echo 0)")
+                    rk=$(hex_to_dec "$(sysfs_read "${lun_path}/read_io_count_kb"   2>/dev/null || echo 0)")
+                    wk=$(hex_to_dec "$(sysfs_read "${lun_path}/write_io_count_kb"  2>/dev/null || echo 0)")
+                    local lun_io=$(( ac + rk + wk ))
+                    if [[ $lun_io -eq 0 ]]; then
                         live_status="${CYN}sysfs:${NC}${GRN}[connected]${NC}"
                     else
-                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  sess: R:${rk}KB W:${wk}KB)${NC}"
+                        live_status="${CYN}sysfs:${NC}${GRN}[active]${NC} ${DIM}(active_cmds:${ac}  R:${rk}KB W:${wk}KB)${NC}"
                     fi
                 fi
             fi
